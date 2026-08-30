@@ -1,0 +1,1884 @@
+---
+title: "一般大學退休教師缺額人力議題"
+format:
+  docx:
+    code-fold: true
+    toc: true
+execute:
+  echo: false
+  warning: false
+jupyter: python3
+---
+
+# 公費留學考試制度變革研究一般大學退休教師缺額人力議題
+
+## 一、資料來源及分布概況
+
+```{python}
+import numpy as np
+import pandas as pd
+from pathlib import Path
+from summarytools import dfSummary
+import matplotlib.pyplot as plt
+import seaborn as sns
+from highlight_text import ax_text, fig_text
+# from src.plot_tools.circular_bar import plot_circular_bar
+
+
+home_pth = Path.cwd().parents[1]
+tempfolder = home_pth.joinpath("temp")
+tempfolder.mkdir(exist_ok=True)
+
+# 設定顯示小數點位數
+pd.options.display.precision = 0
+plt.rcParams['font.family'] = ['Noto Sans CJK TC']  
+
+# 匯入分析用資料
+file_path = home_pth.joinpath("using_data/L2/faculty.csv")
+df_headers = pd.read_csv(file_path,
+                        nrows=0)
+# 找出所有包含「代碼」的欄位名稱
+code_columns = [col for col in df_headers.columns if "代碼" in col]
+# 建立 dtype 字典，將特定欄位設定為字串格式
+dtype_dict = {col: "str" for col in code_columns}
+faculty = pd.read_csv(file_path, dtype=dtype_dict)
+
+# print(f"欄位名稱: {[faculty.columns]}")
+
+# 分析資料篩選
+position_type = "編制內"
+semester = 1 
+mask = "`編制內外` == '編制內' & `學期` == 1 & `學校類別` != '宗教研修學院' & `專兼任` == '專任'"
+# print(f"\n 資料篩選條件：\n {mask}")
+using_df = faculty.query(mask)
+```
+
+
+```{python}
+temp_grps = ["學年度", "設立別", "編制內外", "專兼任"]
+temp_use = faculty.query("學校類別 == '一般大學' & 學期 == 1").reset_index(names=["tempID"])
+temp_use["內外專兼"] = temp_use['編制內外'] + temp_use['專兼任']
+result = temp_use.groupby(temp_grps).size().unstack().reset_index()
+temp_use.pivot_table(
+    index=['學年度'],
+    columns=['設立別', '內外專兼'],
+    values="tempID",
+    aggfunc='count',
+    fill_value=0
+)
+```
+
+## 二、至118學年度公私立一般大學編制內專任教師年齡結構*各學門
+
+==以下皆以「編制內專任」教師納入計算==
+
+### (一)高齡教師年齡佔比
+
+以113學年度之師資人口結構為標準，推算五年後（118學年度）超過65歲以上之編制內專任教師人數和所佔比例。
+
+```{python}
+# 未來5年估算資料
+base_df = using_df.copy().query("學年度 == 113")
+pseudo_df = pd.DataFrame()
+
+for n in range(1,6):
+    newdf = base_df.copy()
+    newdf["學年度"] = newdf["學年度"] + n
+    newdf["年齡"] = newdf["年齡"] + n
+    pseudo_df = pd.concat([pseudo_df, newdf], axis=0, ignore_index=True)
+    
+sim_df = pd.concat([using_df, pseudo_df], axis=0, ignore_index=True)
+# 超過65
+sim_df["over65"] =  sim_df["年齡"] > 65
+# 將研究型大學加入設立別比較
+sim_df["設立別"] = sim_df.apply(lambda x: "研究型" if x["研究型大學"] else x["設立別"], axis=1)
+
+# 預估人數表
+grps = ["學年度", "學校類別", "設立別", "領域代碼", "領域名稱", "學門代碼", "學門名稱"]
+tab_N = sim_df.groupby(grps).agg({"pseudoID": "count", "over65": ["sum", "mean"]}).reset_index()
+tab_N.columns = grps + ["總人數", "超過65歲人數", "超過65歲比例"]
+
+tab_N["預估人數"] = tab_N.apply(lambda x: x["總人數"] if x["學年度"] <= 113 else x["總人數"] - x["超過65歲人數"], axis=1)
+
+totalN_earliest = tab_N.loc[tab_N.groupby(grps[1:])["學年度"].idxmin(), grps[1:] + ["總人數"]]
+totalN_earliest.rename(columns={"總人數": "最早年度人數"}, inplace=True)
+
+# tab_N.rename(columns={"over65": "超過65歲人數", "pseudoID": "總人數"}, inplace=True)
+tab_N = tab_N.merge(totalN_earliest, how="left", on=grps[1:])
+tab_N["人數百分比"] = round((tab_N["預估人數"] / tab_N["最早年度人數"])*100, 2)
+
+# tab_N.to_csv(
+#     tempfolder.joinpath("tab65N.csv"),
+#     index=False
+# )
+tab_N_pivt = (tab_N
+ .pivot_table(
+    index=["學校類別", "設立別", "學門代碼", "學門名稱"],
+    columns="學年度",
+    values="預估人數",
+    fill_value=0
+ )
+)   
+```
+
+
+```{python}
+def styled_table(df, sch_type=None):
+    work_df = df.copy()
+    work_df = work_df.query("學年度 == 118 & 設立別 == @sch_type") # 五年後
+    grp_desc = work_df.groupby(["學門代碼","學門名稱"]).agg({"over65": ["sum", "mean"]}).round(4)
+    grp_desc.columns = ["超過65歲人數", "超過65歲比例"]
+    styled_df = (grp_desc
+    .sort_values(by="超過65歲比例", ascending=False)
+    .style
+    .format({
+        "超過65歲人數": '{:.0f}人',
+        "超過65歲比例": '{:.1%}'
+        })
+    # .set_caption(f'{sch_type}一般大學高齡教師佔比')
+    .background_gradient(
+        subset=["超過65歲比例"],
+        cmap='RdYlBu_r', 
+        vmin=0,
+        # max=grp_desc["超過65歲比例"].max()
+        )
+    )
+
+    return styled_df
+```
+
+
+**公立一般大學高齡教師佔比**
+```{python}
+#| eval: true
+outdf = styled_table(sim_df, "公立")
+outdf
+```
+
+**研究型一般大學高齡教師佔比**
+```{python}
+#| eval: true
+styled_table(sim_df, "研究型")
+```
+
+**私立一般大學高齡教師佔比**
+```{python}
+#| eval: true
+styled_table(sim_df, "私立")
+```
+
+
+**需要手動調整表格，加上「65歲以上比率」**
+
+```{python}
+work_df = sim_df.copy()
+work_df = work_df.query("學年度 == 118 & 學校類別 == '一般大學'") # 五年後
+grp_desc = work_df.groupby(["設立別","學門代碼","學門名稱"]).agg({"over65": ["sum", "mean"]}).round(4)
+grp_desc.columns = ["超過65歲人數", "超過65歲比例"]
+styled_df = (grp_desc
+    # .sort_values(by="超過65歲比例", ascending=False)
+    # .style
+    # .format({
+    #     "超過65歲人數": '{:.0f}人',
+    #     "超過65歲比例": '{:.1%}'
+    #     })
+    .pivot_table(
+        index='學門名稱',
+        columns='設立別',
+        values='超過65歲比例',
+        fill_value=0)
+    .reset_index()
+)
+
+total = work_df.groupby(["學門名稱"]).size().rename("一般大學總人數")
+merged_df = styled_df.merge(total, left_on="學門名稱", right_index=True, how='outer')
+(merged_df
+    .sort_values(by="一般大學總人數", ascending=False)
+    .style.format({
+    "公立": '{:.1%}',
+    "研究型": '{:.1%}',
+    "私立": '{:.1%}'
+    })
+    )
+
+# merged_df.columns = ['超過65歲比例_公立', '超過65歲比例_私立', '總人數']
+
+```
+
+#### 工業學門
+```{python}
+work_df = sim_df.copy()
+work_df = work_df.query("學年度 == 118 & 學校類別 == '一般大學' & 學門名稱 == '工程及工程業學門'") # 五年後
+grp_desc = work_df.groupby(["設立別", "學類名稱"]).agg({"over65": ["sum", "mean"]}).round(4)
+grp_desc.columns = ["超過65歲人數", "超過65歲比例"]
+styled_df = (grp_desc
+    # .sort_values(by="超過65歲比例", ascending=False)
+    # .style
+    # .format({
+    #     "超過65歲人數": '{:.0f}人',
+    #     "超過65歲比例": '{:.1%}'
+    #     })
+    .pivot_table(
+        index='學類名稱',
+        columns='設立別',
+        values='超過65歲比例',
+        fill_value=0)
+    .reset_index()
+)
+
+total = work_df.groupby(["學類名稱"]).size().rename("一般大學學類名稱總人數")
+merged_df = styled_df.merge(total, left_on="學類名稱", right_index=True, how='outer')
+(merged_df
+    .sort_values(by="一般大學學類名稱總人數", ascending=False)
+    .style.format({
+    "公立": '{:.1%}',
+    "研究型": '{:.1%}',
+    "私立": '{:.1%}'
+    })
+    )
+
+# merged_df.columns = ['超過65歲比例_公立', '超過65歲比例_私立', '總人數']
+
+```
+
+
+### (二)教師人數比較
+
+> 退休人數為118年時超過65歲以上人數
+
+```{python}
+# 繪製啞鈴圖
+def plot_dumbell(dframe, sch_type, institution_type=None):
+    df = (dframe
+          .copy()
+          .query("學校類別 == @sch_type")
+          .sort_values(by="Range", ascending=True)
+          .reset_index()
+        )
+    
+    if institution_type:
+        df = df[df["設立別"] == institution_type]
+        titletext = f"{sch_type}_{institution_type}"
+        num_distance = 50
+        yaxis_distance = -300
+    else:
+        titletext = f"{sch_type}"
+        num_distance = 200
+        yaxis_distance = -600
+
+    df.reset_index(inplace=True)
+    
+    color_left, color_right = "#EFAC00", "#28A87D"
+
+    fig, ax = plt.subplots(figsize=(7,8))
+
+    # Add horizontal alignment lines for each row
+    my_range = range(df['學門名稱'].nunique())
+    for y in my_range:
+        ax.axhline(y=y, color='lightgray', linestyle=':', alpha=0.5, xmin=0, xmax=0.95)
+
+    # horizontal lines for dumbell
+    ax.hlines(y=my_range, xmin=df[118], xmax=df[113], color='grey', alpha=0.8)
+
+    # points
+    ax.scatter(df[118], my_range, color=color_left, zorder=3, s=80)
+    ax.scatter(df[113], my_range, color=color_right, zorder=2, s=80)
+
+    # add labels
+    for i in range(df['學門名稱'].nunique()):
+        # lefts (118年)
+        lefts = df[118][i]
+        ax_text(
+            lefts - num_distance, i,
+            f"<{df[118][i]:.0f}>",
+            ha='right', va='center',
+            highlight_textprops=[
+                {"color": color_left,
+                "weight": "bold"}]
+        )
+
+        # rights (113年)
+        rights = df[113][i]
+        ax_text(
+        rights + num_distance, i,
+            f"<{df[113][i]:.0f}>",
+            ha='left', va='center',
+            highlight_textprops=[
+                {"color": color_right,
+                "weight": "bold"}]
+        )
+
+        # team names (學門名稱)
+        team_name = df["學門名稱"][i]
+        ax_text(yaxis_distance, i,
+                f"<{team_name}>",
+                ha='right', va='center',
+                highlight_textprops=[
+                    {"color": "black",
+                    "weight": "bold",
+                    "size": 8}]
+            )
+        
+    # remove axis
+    ax.set_axis_off()
+
+    # title
+    text = f"{titletext}各學門<118年扣除退休人數>與<113年度人數>比較"
+    fig_text(
+        0.15, 0.94,
+        text,
+        fontsize=20,
+        ha='left', va='center',
+        highlight_textprops=[
+            {"color": color_left},
+            {"color": color_right},
+        ]
+    )
+
+    plt.tight_layout()
+    plt.show()
+```
+
+```{python}
+tab_N_pivt = (tab_N
+ .pivot_table(
+    index=["學校類別", "設立別", "學門代碼", "學門名稱"],
+    columns="學年度",
+    values="預估人數",
+    fill_value=0
+ )
+)   
+
+compared_df = (tab_N_pivt[[113, 118]]
+      .reset_index()
+      .groupby(["學校類別", "學門代碼", "學門名稱"])
+      .agg({113: "sum", 118: "sum"})
+      .assign(Range = lambda x: x[113] - x[118])
+      )
+```
+
+
+```{python}
+plot_dumbell(compared_df, "一般大學")
+```
+
+**另一種呈現方式，直接表現退休人數的排序**
+
+> 以同心圓圖形呈現118學年度相較於113學年度將會退休（超過65歲）的人數，越達外圈則表示人數越多，每圈差距為100人，最外圈人數為100人。其中研究型大學「醫藥」及「工程學門」65歲以上人數便達到350人以上。
+
+
+```{python}
+#| eval: true
+using = tab_N.assign(
+    Name = lambda x: x["學門名稱"],
+    Value = lambda x: x["超過65歲人數"],
+)
+df_pb = (using
+    .query("學校類別 == '一般大學' & 設立別 == '公立' & 學年度 == 118")
+    .sort_values(by=["Value"], ascending=False)
+    .reset_index(drop=True)
+)
+
+df_pr = (using
+    .query("學校類別 == '一般大學' & 設立別 == '私立' & 學年度 == 118")
+    .sort_values(by=["Value"], ascending=False)
+    .reset_index(drop=True)
+)
+
+df_rs = (using
+    .query("學校類別 == '一般大學' & 設立別 == '研究型' & 學年度 == 118")
+    .sort_values(by=["Value"], ascending=False)
+    .reset_index(drop=True)
+)
+
+```
+
+```{python}
+# 繪製同心圓圖
+def plot_circular_bar(
+    df,
+    title="一般大學",
+    ax=None,
+    bar_color="#61a4b2",
+    title_size=18,
+    figure_size=(20, 10),
+    upper_limit=100,
+    lower_limit=30,
+):
+    """
+    建立圓形長條圖的函式
+
+    參數說明：
+    df: DataFrame，需包含 'Name' 和 'Value' 兩個欄位
+    title: 圖表中央標題
+    ax: 圖表軸物件（可選），若未提供則自動創建
+    bar_color: 長條圖顏色
+    title_size: 中央標題字體大小
+    figure_size: 圖表尺寸，僅在未提供 ax 時使用
+    upper_limit: 長條圖最大值限制
+    lower_limit: 長條圖最小值限制
+    """
+
+    # 如果未提供 ax，則創建新的圖表
+    if ax is None:
+        plt.figure(figsize=figure_size)
+        ax = plt.subplot(111, polar=True)
+
+    # 設定標籤間距
+    label_padding = 4
+
+    # 計算資料集中的最大值
+    max_value = df["Value"].max()
+
+    # 計算長條圖高度
+    slope = (max_value - lower_limit) / max_value
+    heights = slope * df.Value + lower_limit
+
+    # 計算每個長條的寬度
+    width = 2 * np.pi / len(df.index)
+
+    # 計算每個長條的中心角度
+    indexes = list(range(1, len(df.index) + 1))
+    angles = [element * width for element in indexes]
+
+    # 繪製長條
+    bars = ax.bar(
+        x=angles,
+        height=heights,
+        width=width,
+        bottom=lower_limit,
+        linewidth=2,
+        edgecolor="white",
+        color=bar_color,
+    )
+
+    # 添加中央標題
+    ax.text(
+        0, -100, title, ha="center", va="center", fontsize=title_size, fontweight="bold"
+    )
+
+    # 設定圖表樣式
+    ax.set_frame_on(False)
+    ax.set_ylim(-100, max_value + 1)
+    ax.xaxis.grid(False)
+    ax.yaxis.grid(True, alpha=0.3)
+    ax.set_xticks([])
+    ax.set_yticks(range(50, int(max_value) + 10, 100))
+
+    # 添加標籤
+    for bar, angle, height, label in zip(bars, angles, heights, df["Name"]):
+        rotation = np.rad2deg(angle)
+
+        if angle >= np.pi / 2 and angle < 3 * np.pi / 2:
+            alignment = "right"
+            rotation = rotation + 180
+        else:
+            alignment = "left"
+
+        ax.text(
+            x=angle,
+            y=lower_limit + bar.get_height() + label_padding,
+            s=label,
+            ha=alignment,
+            va="center",
+            rotation=rotation,
+            rotation_mode="anchor",
+        )
+
+    return ax
+
+```
+
+```{python}
+#| eval: true
+# 排版設定
+fig = plt.figure(figsize=(20, 24)) 
+
+ax1 = fig.add_subplot(131, projection='polar')  # 1列3欄的第1個位置
+plot_circular_bar(df_pb, "公立", bar_color="#7fc97f", ax=ax1)
+
+ax2 = fig.add_subplot(132, projection='polar')  # 1列3欄的第2個位置
+plot_circular_bar(df_pr, "私立", bar_color="#beaed4", ax=ax2)
+
+ax3 = fig.add_subplot(133, projection='polar')  # 1列3欄的第3個位置
+plot_circular_bar(df_rs, "研究型", bar_color="#fdc086", ax=ax3)
+
+plt.tight_layout()
+
+plt.show()
+
+```
+
+### (三)113年上學期教師年齡人口金字塔
+
+
+```{python}
+# 製作年齡組
+using_df113 = using_df.query("學年度 == 113")
+using_df113["age_group"] = pd.cut(
+    using_df113["年齡"],
+    right=False,
+    bins=[29, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75],
+    labels=[
+        "30-",
+        "30-34",
+        "35-39",
+        "40-44",
+        "45-49",
+        "50-54",
+        "55-59",
+        "60-64",
+        "65-70",
+        "75+",
+    ],
+)
+using_df113.dropna(subset=["age_group"], inplace=True)
+df_for_pyramaid = using_df113.groupby(["領域名稱", "學門代碼", "學門名稱", "學校類別" , "age_group", "性別"]).size().unstack().reset_index()
+# 去除空白組
+df_for_pyramaid["match"] = df_for_pyramaid["領域名稱"] + df_for_pyramaid["學門代碼"] + df_for_pyramaid["學門名稱"]
+df_for_pyramaid = df_for_pyramaid[df_for_pyramaid["match"].isin((using_df113["領域名稱"] + using_df113["學門代碼"] + using_df113["學門名稱"]).unique())]
+```
+
+```{python}
+# 以差距最大的排序
+# sorting = (compared_df
+#     .reset_index()[["學校類別", "學門代碼", "Range"]]
+#     .sort_values(by=["Range"], ascending=True)
+#     .reset_index(drop=True)
+#     .reset_index(names=["range_order"])
+#     )
+# df_for_pyramaid2 = df_for_pyramaid.merge(sorting, 
+# on=["學校類別", "學門代碼"], how="left")
+# domains = df_for_pyramaid["領域名稱"].unique()
+```
+
+```{python}
+# 繪製人口金字塔
+def plot_pyramaid_all_domains(dataframe, domain, sch_type="一般大學"):
+    """
+    為指定學校類別的所有學門繪製人口金字塔圖
+    
+    Parameters:
+    dataframe: DataFrame, 包含學校類別、學門和性別數據的原始資料
+    sch_type: str, 學校類別名稱
+    domain: str, 分組篩選
+    """
+    
+    # 篩選特定學校類別的數據
+    df = dataframe.copy()
+    df = df.query("`學校類別` == @sch_type & 領域名稱 in @domain")
+
+    # 排序並分組
+    # sorted_df = df.sort_values(["range_order", "age_group"]) # 以變化幅度排序
+    # grouped = sorted_df.groupby(["range_order", "學門名稱"])
+    sorted_df = df.sort_values(["學門代碼", "age_group"])
+    grouped = sorted_df.groupby(["學門代碼", "學門名稱"])
+
+
+    # 計算需要的子圖行數和列數
+    n_domains = len(grouped)
+    ncols = 2  # 固定每行2個圖
+    nrows = (n_domains + ncols - 1) // ncols
+
+    # 創建主圖
+    fig = plt.figure(figsize=(22.5, 7.5 * nrows))
+
+
+    # 為每個學門創建子圖
+    for i, ((domain_code, domain_name), domain_data) in enumerate(grouped, 1):
+        ax = fig.add_subplot(nrows, ncols, i)
+        
+        # 找出最大值用於相對定位
+        max_value = max(abs(domain_data["男"].max()), domain_data["女"].max())
+        
+        # 創建水平條形圖
+        ax.barh(domain_data["age_group"], -domain_data["男"], color="blue", alpha=0.5, height=0.9)
+        ax.barh(domain_data["age_group"], domain_data["女"], color="darkorange", alpha=0.5, height=0.9)
+        
+        # 設置x軸限制以保持對稱
+        ax.set_xlim(-max_value * 1.2, max_value * 1.2)
+        
+        # 移除軸標籤
+        ax.set_xticks([])
+        ax.set_yticks([])
+        
+        # 移除邊框
+        ax.spines[["right", "top", "left", "bottom"]].set_visible(False)
+        
+        # 在圖表中心添加年齡組標籤
+        for idx, (age_group, male_count, female_count) in enumerate(zip(
+            domain_data["age_group"],
+            domain_data["男"],
+            domain_data["女"]
+        )):
+                        
+            ax.text(
+                0,  # 始終在中心
+                idx,
+                age_group,
+                ha="center",
+                va="center",
+                fontsize=20,
+                alpha=0.8,
+                fontweight="bold",
+            )
+            
+             # 男性數量標籤
+            if male_count > 0:
+                ax.text(
+                    -male_count - (max_value * 0.07),  # 稍微往外偏移
+                    idx,
+                    f"{int(male_count):,}",  # 格式化數字
+                    ha="right",
+                    va="center",
+                    fontsize=16,
+                    color="darkblue",
+                )
+            
+            # 女性數量標籤
+            if female_count > 0:
+                ax.text(
+                    female_count + (max_value * 0.1),  # 稍微往外偏移
+                    idx,
+                    f"{int(female_count):,}",  # 格式化數字
+                    ha="left",
+                    va="center",
+                    fontsize=16,
+                    color="darkorange",
+                )
+            
+        
+        # 添加性別標籤（使用相對位置）
+        ax.text(
+            max_value * 0.6,  # 最大值的60%位置
+            0,
+            "Female",
+            color="darkorange",
+            ha="center",
+            va="center",
+            weight="bold",
+            fontsize=30
+        )
+        ax.text(
+            -max_value * 0.6,  # 最大值的-60%位置
+            0,
+            "Male",
+            color="darkblue",
+            ha="center",
+            va="center",
+            weight="bold",
+            fontsize=30
+        )
+        
+        # 添加標題（包含學門代碼和名稱）
+        ax.set_title(f"{domain_name}", weight="bold", fontsize=40)
+
+    # 調整子圖之間的間距
+    plt.tight_layout()
+
+    # 添加總標題
+    text = "&".join(f"{item}" for item in domain)
+    fig.suptitle(f"113年 {text} \n教師人口金字塔", fontsize=50, y=1.02)
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    # 顯示圖表
+    plt.show()
+```
+
+
+```{python}
+plot_pyramaid_all_domains(df_for_pyramaid,  domain=["工程、製造及營建領域"])
+```
+
+
+```{python}
+plot_pyramaid_all_domains(df_for_pyramaid,  domain=["資訊通訊科技領域", "醫藥衛生及社會福利領域"])
+```
+
+```{python}
+plot_pyramaid_all_domains(df_for_pyramaid,  domain=['自然科學、數學及統計領域', '農業、林業、漁業及獸醫領域'])
+```
+
+```{python}
+plot_pyramaid_all_domains(df_for_pyramaid,  domain=['教育領域', '社會科學、新聞學及圖書資訊領域'])
+```
+
+```{python}
+plot_pyramaid_all_domains(df_for_pyramaid,  domain=['藝術及人文領域'])
+```
+
+```{python}
+plot_pyramaid_all_domains(df_for_pyramaid,  domain=['商業、管理及法律領域', '服務領域', '其他領域'])
+```
+
+#### 細看工業學門
+```{python}
+df_for_pyramaid_engineering = (using_df113
+    .query("學門代碼 == '071'")
+    .groupby(["學類代碼", "學類名稱", "學校類別" , "age_group", "性別"])
+    .size()
+    .unstack()
+    .reset_index()
+    )
+
+# 去除空白組
+df_for_pyramaid_engineering["match"] = df_for_pyramaid_engineering["學類代碼"] + df_for_pyramaid_engineering["學類名稱"]
+df_for_pyramaid_engineering = df_for_pyramaid_engineering[df_for_pyramaid_engineering["match"].isin((using_df113["學類代碼"] + using_df113["學類名稱"]).unique())]
+```
+
+
+
+```{python}
+#|warning: false
+def plot_pyramaid_engineering(dataframe, sch_type):
+    """
+    為指定學校類別的工業學學門內學類繪製人口金字塔圖
+    
+    Parameters:
+    dataframe: DataFrame, 包含學校類別、學門和性別數據的原始資料
+    sch_type: str, 學校類別名稱
+    """
+    
+    # 篩選特定學校類別的數據
+    df = dataframe.copy()
+    df = df.query("`學校類別` == @sch_type")
+    # 排序並分組
+    sorted_df = df.sort_values(["學類代碼", "學類名稱"])
+    grouped = sorted_df.groupby(["學類代碼", "學類名稱"])
+
+    # 計算需要的子圖行數和列數
+    n_domains = len(grouped)
+    ncols = 2  # 固定每行2個圖
+    nrows = (n_domains + ncols - 1) // ncols
+
+    # 創建主圖
+    fig = plt.figure(figsize=(22.5, 7.5 * nrows))
+
+    # 為每個學門創建子圖
+    for i, ((domain_code, domain_name), domain_data) in enumerate(grouped, 1):
+        ax = fig.add_subplot(nrows, ncols, i)
+        # 找出最大值用於相對定位
+        max_value = max(abs(domain_data["男"].max()), domain_data["女"].max())
+        
+        # 創建水平條形圖
+        ax.barh(domain_data["age_group"], -domain_data["男"], color="blue", alpha=0.5, height=0.9,)
+        ax.barh(domain_data["age_group"], domain_data["女"], color="darkorange", alpha=0.5, height=0.9,)
+        
+        # 設置x軸限制以保持對稱
+        ax.set_xlim(-max_value * 1.2, max_value * 1.2)
+        
+        # 移除軸標籤
+        ax.set_xticks([])
+        ax.set_yticks([])
+        
+        # 移除邊框
+        ax.spines[["right", "top", "left", "bottom"]].set_visible(False)
+        
+        # 在圖表中心添加年齡組標籤
+        for idx, (age_group, male_count, female_count) in enumerate(zip(
+            domain_data["age_group"],
+            domain_data["男"],
+            domain_data["女"]
+        )):
+            
+            ax.text(
+                0,  # 始終在中心
+                idx,
+                age_group,
+                ha="center",
+                va="center",
+                fontsize=20,
+                alpha=0.8,
+                fontweight="bold",
+            )
+            
+            # 男性數量標籤
+            if male_count > 0:
+                ax.text(
+                    -male_count - (max_value * 0.07),  # 稍微往外偏移
+                    idx,
+                    f"{int(male_count):,}",  # 格式化數字
+                    ha="right",
+                    va="center",
+                    fontsize=16,
+                    color="darkblue",
+                )
+            
+            # 女性數量標籤
+            if female_count > 0:
+                ax.text(
+                    female_count + (max_value * 0.1),  # 稍微往外偏移
+                    idx,
+                    f"{int(female_count):,}",  # 格式化數字
+                    ha="left",
+                    va="center",
+                    fontsize=16,
+                    color="darkorange",
+                )
+        
+        # 添加性別標籤（使用相對位置）
+        ax.text(
+            max_value * 0.6,  # 最大值的60%位置
+            0,
+            "Female",
+            color="darkorange",
+            ha="center",
+            va="center",
+            weight="bold",
+            fontsize=30
+        )
+        ax.text(
+            -max_value * 0.6,  # 最大值的-60%位置
+            0,
+            "Male",
+            color="darkblue",
+            ha="center",
+            va="center",
+            weight="bold",
+            fontsize=30
+        )
+        
+        # 添加標題（包含學門代碼和名稱）
+        ax.set_title(f"{domain_name}", weight="bold", fontsize=40)
+
+    # 調整子圖之間的間距
+    plt.tight_layout()
+
+    # 添加總標題
+    fig.suptitle(f"113年工業學門教師人口金字塔", fontsize=50, y=1.02)
+
+    # 顯示圖表
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+    plt.show()
+```
+
+```{python}
+plot_pyramaid_engineering(df_for_pyramaid_engineering, "一般大學")
+```
+
+#### 編制外專任
+```{python}
+mask2 = "`編制內外` == '編制外' & `學期` == 1 & `學校類別` != '宗教研修學院' & `專兼任` == '專任'"
+# print(f"\n 資料篩選條件：\n {mask}")
+using_df2 = faculty.query(mask2)
+
+# 製作年齡組
+using_df2["age_group"] = pd.cut(
+    using_df2["年齡"],
+    right=False,
+    bins=[29, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75],
+    labels=[
+        "30-",
+        "30-34",
+        "35-39",
+        "40-44",
+        "45-49",
+        "50-54",
+        "55-59",
+        "60-64",
+        "65-70",
+        "75+",
+    ],
+)
+using_df2.dropna(subset=["age_group"], inplace=True)
+df_for_pyramaid2 = using_df2.groupby(["領域名稱", "學門代碼", "學門名稱", "學校類別" , "age_group", "性別"]).size().unstack().reset_index()
+# 去除空白組
+df_for_pyramaid2["match"] = df_for_pyramaid2["領域名稱"] + df_for_pyramaid2["學門代碼"] + df_for_pyramaid2["學門名稱"]
+df_for_pyramaid2 = df_for_pyramaid2[df_for_pyramaid2["match"].isin((using_df2["領域名稱"] + using_df2["學門代碼"] + using_df2["學門名稱"]).unique())]
+```
+
+```{python}
+plot_pyramaid_all_domains(df_for_pyramaid2,  domain=["工程、製造及營建領域"])
+```
+
+
+```{python}
+plot_pyramaid_all_domains(df_for_pyramaid2,  domain=["資訊通訊科技領域", "醫藥衛生及社會福利領域"])
+```
+
+```{python}
+plot_pyramaid_all_domains(df_for_pyramaid2,  domain=['自然科學、數學及統計領域', '農業、林業、漁業及獸醫領域'])
+```
+
+```{python}
+plot_pyramaid_all_domains(df_for_pyramaid2,  domain=['教育領域', '社會科學、新聞學及圖書資訊領域'])
+```
+
+```{python}
+plot_pyramaid_all_domains(df_for_pyramaid2,  domain=['藝術及人文領域'])
+```
+
+```{python}
+plot_pyramaid_all_domains(df_for_pyramaid2,  domain=['商業、管理及法律領域', '服務領域', '其他領域'])
+```
+
+
+
+
+### 三、教師人數變化圖
+
+```{python}
+def plot_faculty_N(dframe, field, y_var="預估人數", sch_type=None):
+    df = dframe.copy().reset_index()
+    df.query("學校類別 == '一般大學' & 領域名稱 in @field", inplace=True)
+    x_var = "學門名稱"
+    time_var = "學年度"
+    y_var="預估人數"
+
+    # 建立顏色調色盤
+    unique_domains = df[x_var].unique()
+    num_domains = len(unique_domains)
+    # domain_colors = dict(zip(unique_domains, sns.color_palette("Set1", len(unique_domains))))
+    base_colors = [
+        '#4C72B0',  # 深藍色
+        '#DD8452',  # 磚紅色
+        '#55A868',  # 森林綠
+        '#C44E52',  # 暗紅色
+        '#8172B3',  # 紫羅蘭
+        '#937860',  # 棕褐色
+        '#6C7A89',  # 石板灰
+        '#CCB974',  # 暖金色
+        '#64B5CD',  # 青藍色
+        '#A0522D',  # 赭石色
+        '#566573'   # 深灰藍
+    ]
+
+
+    # 自動調整顏色數量
+    if num_domains <= len(base_colors):
+        print_friendly_colors = base_colors[:num_domains]
+    else:
+        # 如果需要更多顏色，使用colormap自動生成
+        print_friendly_colors = sns.color_palette("husl", num_domains)
+
+    domain_colors = dict(zip(unique_domains, print_friendly_colors))
+
+
+    # 自動計算最佳的列數和行數
+    num_x = len(df[x_var].unique())
+    ncols = 2  # 固定每行3個圖
+    nrows = int(np.ceil(num_x / ncols))  # 根據總數計算所需行數
+
+    # 根據行列數調整圖形大小
+    # 每個子圖的基礎大小
+    base_width = 8
+    base_height = 6
+    fig, ax = plt.subplots(nrows, ncols, 
+                        figsize=(base_width * ncols, base_height * nrows), 
+                        dpi=300)
+
+    # 將軸向陣列攤平方便迭代
+    ax = ax.flatten()
+
+    # 繪製多條折線圖
+    for i, group in enumerate(df[x_var].unique()):
+        # 篩選特定群組的數據
+        filtered_df = df[df[x_var] == group].sort_values(by=time_var).reset_index(drop=True)
+
+
+        domain = filtered_df[x_var].iloc[0]
+        # 根據領域選擇顏色
+        color = domain_colors[domain]
+        
+        sns.lineplot(
+            data=filtered_df[filtered_df["設立別"] == "公立"],
+            x=time_var,
+            y=y_var,
+            ax=ax[i],
+            marker='^',
+            color=color,
+            linewidth=3,
+            alpha=1,
+            label='公立', 
+            linestyle='-'  # 實線表示公立
+            )
+        
+        sns.lineplot(
+            data=filtered_df[filtered_df["設立別"] == "私立"],
+            x=time_var,
+            y=y_var,
+            ax=ax[i],
+            marker='s',  # 使用方形標記區分私立
+            color=color,
+            linewidth=3,
+            alpha=1,
+            label='私立',
+            linestyle='--'  # 虛線表示私立
+        )
+        
+        sns.lineplot(
+            data=filtered_df[filtered_df["設立別"] == "研究型"],
+            x=time_var,
+            y=y_var,
+            ax=ax[i],
+            marker='o',
+            color=color,
+            linewidth=3,
+            alpha=1,
+            label='研究型', 
+            linestyle=':'  
+            )
+        
+        # 設定 x 軸顯示所有年份
+        ax[i].set_xticks(df[time_var].unique())  # 設定所有年份都顯示
+        ax[i].tick_params(axis='x', rotation=45, labelsize=20)  # 旋轉 x 軸標籤避免重疊
+        ax[i].set_xlabel("學年度", fontsize=20)
+
+        # 設定座標軸範圍
+        ax[i].set_xlim(df[time_var].min(), df[time_var].max())  
+        ymax_value = filtered_df[y_var].max()
+        ax[i].set_ylim(0, ymax_value * 1.5)  # 留些邊際空間
+        # Y軸尺度不等
+        ax[i].set_yticks(range(0, int(ymax_value * 1.2)))
+        ax[i].yaxis.set_major_locator(plt.MaxNLocator(10))  # 設定y軸最多顯示10個刻度
+        ax[i].tick_params(axis='y', labelsize=20)
+        ax[i].set_ylabel("總人數", fontsize=20)
+        
+        # 加入格線使數值更容易對應
+        ax[i].grid(True, axis='y', linestyle='--', alpha=0.7)
+        
+        # 加入標題
+        ax[i].set_title(group, loc='left', fontsize=35, fontweight="bold", color=color, pad=10)
+        
+        # 將圖例放在子圖左方
+        ax[i].legend(
+            bbox_to_anchor=(1.02, 1.0),  
+            loc='upper left',        
+            ncol=1,                    
+            fontsize=20,
+            frameon=True,
+            borderaxespad=0.                 
+        )
+
+        # 隱藏多餘的子圖（第26張之後的）
+        for i in range(num_x, len(ax)):
+            ax[i].set_visible(False)
+    # 主標題
+    titletext = "&".join(f"{item}" for item in field)
+    fig.suptitle(
+        f"一般大學\n{titletext}人數變化",
+        fontweight='bold',
+        fontsize=50,
+        color='black',
+        style='italic',
+        y=0.98
+    )
+    # 調整子圖之間的間距
+    plt.subplots_adjust(hspace=0.4, wspace=0.4)
+
+    # 調整版面配置
+    fig.tight_layout(rect=[0, 0.02, 0.95, 0.96])
+
+    # 顯示圖表
+    plt.show()
+```
+
+
+```{python}
+# 預估人數表
+grps = ["學年度", "學校類別", "設立別", "領域代碼", "領域名稱", "學門代碼", "學門名稱"]
+tab_N2 = sim_df.groupby(grps).agg({"pseudoID": "count", "over65": ["sum", "mean"]}).reset_index()
+tab_N2.columns = grps + ["總人數", "超過65歲人數", "超過65歲比例"]
+
+tab_N2["預估人數"] = tab_N2.apply(lambda x: x["總人數"] if x["學年度"] <= 113 else x["總人數"] - x["超過65歲人數"], axis=1)
+
+totalN_earliest = tab_N2.loc[tab_N2.groupby(grps[1:])["學年度"].idxmin(), grps[1:] + ["總人數"]]
+totalN_earliest.rename(columns={"總人數": "最早年度人數"}, inplace=True)
+
+tab_N2 = tab_N2.merge(totalN_earliest, how="left", on=grps[1:])
+tab_N2["人數百分比"] = round((tab_N2["預估人數"] / tab_N2["最早年度人數"])*100, 2)
+```
+
+
+```{python}
+plot_faculty_N(tab_N2, field=["工程、製造及營建領域"])
+```
+
+
+```{python}
+plot_faculty_N(tab_N2, field=["資訊通訊科技領域", "醫藥衛生及社會福利領域"])
+```
+
+```{python}
+plot_faculty_N(tab_N2,  field=['自然科學、數學及統計領域', '農業、林業、漁業及獸醫領域'])
+```
+
+```{python}
+plot_faculty_N(tab_N2,  field=['教育領域', '社會科學、新聞學及圖書資訊領域'])
+```
+
+```{python}
+plot_faculty_N(tab_N2,  field=['藝術及人文領域'])
+```
+
+```{python}
+plot_faculty_N(tab_N2,  field=['商業、管理及法律領域', '服務領域', '其他領域'])
+```
+
+
+#### 細看工業學門
+```{python}
+# 繪製歷年折線圖
+def plot_faculty_N_engineering(dframe, field, y_var="預估人數", sch_type=None):
+    df = dframe.copy().reset_index()
+    df.query("學校類別 == '一般大學' & 學門名稱 in @field", inplace=True)
+    x_var = "學類名稱"
+    time_var = "學年度"
+    y_var="預估人數"
+
+    # 建立顏色調色盤
+    unique_domains = df[x_var].unique()
+    num_domains = len(unique_domains)
+    # domain_colors = dict(zip(unique_domains, sns.color_palette("Set1", len(unique_domains))))
+    base_colors = [
+        '#4C72B0',  # 深藍色
+        '#DD8452',  # 磚紅色
+        '#55A868',  # 森林綠
+        '#C44E52',  # 暗紅色
+        '#8172B3',  # 紫羅蘭
+        '#937860',  # 棕褐色
+        '#6C7A89',  # 石板灰
+        '#CCB974',  # 暖金色
+        '#64B5CD',  # 青藍色
+        '#A0522D',  # 赭石色
+        '#566573'   # 深灰藍
+    ]
+
+
+    # 自動調整顏色數量
+    if num_domains <= len(base_colors):
+        print_friendly_colors = base_colors[:num_domains]
+    else:
+        # 如果需要更多顏色，使用colormap自動生成
+        print_friendly_colors = sns.color_palette("husl", num_domains)
+
+    domain_colors = dict(zip(unique_domains, print_friendly_colors))
+
+
+    # 自動計算最佳的列數和行數
+    num_x = len(df[x_var].unique())
+    ncols = 2  # 固定每行3個圖
+    nrows = int(np.ceil(num_x / ncols))  # 根據總數計算所需行數
+
+    # 根據行列數調整圖形大小
+    # 每個子圖的基礎大小
+    base_width = 8
+    base_height = 6
+    fig, ax = plt.subplots(nrows, ncols, 
+                        figsize=(base_width * ncols, base_height * nrows), 
+                        dpi=300)
+
+    # 將軸向陣列攤平方便迭代
+    ax = ax.flatten()
+
+    # 繪製多條折線圖
+    for i, group in enumerate(df[x_var].unique()):
+        # 篩選特定群組的數據
+        filtered_df = df[df[x_var] == group].sort_values(by=time_var).reset_index(drop=True)
+
+
+        domain = filtered_df[x_var].iloc[0]
+        # 根據領域選擇顏色
+        color = domain_colors[domain]
+        
+        sns.lineplot(
+            data=filtered_df[filtered_df["設立別"] == "公立"],
+            x=time_var,
+            y=y_var,
+            ax=ax[i],
+            marker='^',
+            color=color,
+            linewidth=3,
+            alpha=1,
+            label='公立', 
+            linestyle='-'  # 實線表示公立
+            )
+        
+        sns.lineplot(
+            data=filtered_df[filtered_df["設立別"] == "私立"],
+            x=time_var,
+            y=y_var,
+            ax=ax[i],
+            marker='s',  # 使用方形標記區分私立
+            color=color,
+            linewidth=3,
+            alpha=1,
+            label='私立',
+            linestyle='--'  # 虛線表示私立
+        )
+        
+        sns.lineplot(
+            data=filtered_df[filtered_df["設立別"] == "研究型"],
+            x=time_var,
+            y=y_var,
+            ax=ax[i],
+            marker='o',
+            color=color,
+            linewidth=3,
+            alpha=1,
+            label='研究型', 
+            linestyle=':'  
+            )
+        
+        # 設定 x 軸顯示所有年份
+        ax[i].set_xticks(df[time_var].unique())  # 設定所有年份都顯示
+        ax[i].tick_params(axis='x', rotation=45, labelsize=20)  # 旋轉 x 軸標籤避免重疊
+        ax[i].set_xlabel("學年度", fontsize=20)
+
+        # 設定座標軸範圍
+        ax[i].set_xlim(df[time_var].min(), df[time_var].max())  
+        ymax_value = filtered_df[y_var].max()
+        ax[i].set_ylim(0, ymax_value * 1.5)  # 留些邊際空間
+         # 欄位尺度不等
+        ax[i].set_yticks(range(0, int(ymax_value * 1.2)))
+        # ax.set_yticks(range(0, ymax_value * 1.2, 500))
+        ax[i].yaxis.set_major_locator(plt.MaxNLocator(10))  # 設定y軸最多顯示10個刻度
+        ax[i].tick_params(axis='y', labelsize=20)
+        ax[i].set_ylabel("總人數", fontsize=20)
+        
+        # 加入格線使數值更容易對應
+        ax[i].grid(True, axis='y', linestyle='--', alpha=0.7)
+        
+        # 加入標題
+        ax[i].set_title(group, loc='left', fontsize=35, fontweight="bold", color=color, pad=10)
+        
+        # 將圖例放在子圖左方
+        ax[i].legend(
+            bbox_to_anchor=(1.02, 1.0),  
+            loc='upper left',        
+            ncol=1,                    
+            fontsize=20,
+            frameon=True,
+            borderaxespad=0.                 
+        )
+
+        # 隱藏多餘的子圖（第26張之後的）
+        for i in range(num_x, len(ax)):
+            ax[i].set_visible(False)
+    # 主標題
+    titletext = "&".join(f"{item}" for item in field)
+    fig.suptitle(
+        f"一般大學\n{titletext}人數變化",
+        fontweight='bold',
+        fontsize=50,
+        color='black',
+        style='italic',
+        y=0.98
+    )
+    # 調整子圖之間的間距
+    plt.subplots_adjust(hspace=0.4, wspace=0.4)
+
+    # 調整版面配置
+    fig.tight_layout(rect=[0, 0.02, 0.95, 0.96])
+
+    # 顯示圖表
+    plt.show()
+```
+
+
+```{python}
+# 預估人數表
+grps = ["學年度", "設立別", "學校類別", "學門代碼", "學門名稱", "學類代碼", "學類名稱"]
+tab_engineering = sim_df.groupby(grps).agg({"pseudoID": "count", "over65": ["sum", "mean"]}).reset_index()
+tab_engineering.columns = grps + ["總人數", "超過65歲人數", "超過65歲比例"]
+
+tab_engineering["預估人數"] = tab_engineering.apply(lambda x: x["總人數"] if x["學年度"] <= 113 else x["總人數"] - x["超過65歲人數"], axis=1)
+
+totalN_earliest = tab_engineering.loc[tab_engineering.groupby(grps[1:])["學年度"].idxmin(), grps[1:] + ["總人數"]]
+totalN_earliest.rename(columns={"總人數": "最早年度人數"}, inplace=True)
+
+tab_engineering = tab_engineering.merge(totalN_earliest, how="left", on=grps[1:])
+tab_engineering["人數百分比"] = round((tab_engineering["預估人數"] / tab_engineering["最早年度人數"])*100, 2)
+```
+
+```{python}
+plot_faculty_N_engineering(tab_engineering, field=["工程及工程業學門"])
+```
+
+---
+
+
+```{python}
+#| eval: true
+
+# 繪製義大利麵圖(全學門)
+def plot_spaghetti_all(dframe, sch_type):
+    df = dframe.copy()
+    df.query("學校類別 == '一般大學' & 設立別 == @sch_type", inplace=True)
+
+    df.rename(
+    columns={"學年度": "Time", "學門名稱": "unit", "人數百分比": "value"},
+    inplace=True,
+    )
+    group_sort = df[df["Time"] == 118].sort_values(by=["value"], ascending=True).reset_index(drop=True).reset_index(names=["grpsort"])
+    df = df.merge(group_sort[["學門代碼", "grpsort"]], how="left", on="學門代碼")
+    df = df.sort_values(by=["grpsort", "Time"], ascending=True).reset_index(drop=True)
+
+    # 獲取唯一的領域數量，用於建立顏色映射
+    unique_domains = df['領域名稱'].unique()
+    # domain_colors = dict(zip(unique_domains, sns.color_palette("Set1", len(unique_domains))))
+    print_friendly_colors = [
+        '#4C72B0',  # 深藍色
+        '#DD8452',  # 磚紅色
+        '#55A868',  # 森林綠
+        '#C44E52',  # 暗紅色
+        '#8172B3',  # 紫羅蘭
+        '#937860',  # 棕褐色
+        '#6C7A89',  # 石板灰
+        '#CCB974',  # 暖金色
+        '#64B5CD',  # 青藍色
+        '#A0522D',  # 赭石色
+        '#566573'   # 深灰藍
+    ]
+
+    domain_colors = dict(zip(unique_domains, print_friendly_colors))
+
+    # 自動計算最佳的列數和行數
+    num_countries = len(df['unit'].unique())
+    # 自動計算最佳的列數和行數
+    num_countries = len(df['unit'].unique())
+    ncols = 2  # 固定每行2個圖
+    nrows = int(np.ceil(num_countries / ncols))  # 根據總數計算所需行數
+
+    # 根據行列數調整圖形大小
+    # 每個子圖的基礎大小
+    base_width = 8
+    base_height = 6
+    fig, ax = plt.subplots(nrows, ncols, 
+                        figsize=(base_width * ncols, base_height * nrows), 
+                        dpi=300)
+
+    # 在整個圖表頂部添加大標題
+    # 建立 sch_type 對應的顏色字典
+    type_colors = {
+        '公立': '#7fc97f',    
+        '私立': '#beaed4',    
+        '研究型': '#fdc086',      
+    }
+
+    fig.text(0.1, 0.92, f"({sch_type})一般大學人數變化百分比",  # sch_type 文字
+         fontsize=50,
+         fontweight='bold',
+         ha='left',
+         va='top',
+         color=type_colors.get(sch_type, 'black')  # 特定顏色
+        )
+
+    # 將ax轉換為一維數組
+    ax = ax.flatten()
+
+    # 在子圖中繪製每個群組
+    for i, group in enumerate(df['unit'].unique()):
+        # 篩選特定群組的數據
+        filtered_df = df[df['unit'] == group].sort_values(by='Time').reset_index(drop=True)
+        x = filtered_df['Time']
+        y = filtered_df['value']
+        
+        # 獲取該國家的領域
+        domain = filtered_df['領域名稱'].iloc[0]
+        # 根據領域選擇顏色
+        color = domain_colors[domain]
+
+        # 獲取該群組的最新值
+        sorted_df = filtered_df
+        last_value = sorted_df.iloc[-1]['value']
+        last_date = sorted_df.iloc[-1]['Time']
+
+        # 設定每個子圖的背景顏色
+        ax[i].set_facecolor('seashell')
+        fig.set_facecolor('seashell')
+        
+        # 繪製主要線條
+        ax[i].plot(x, y, color=color, marker="o", linewidth=6)
+        
+        # 添加最終值的點
+        ax[i].plot(last_date,
+                last_value,
+                marker='o',
+                markersize=14,
+                color=color,
+                )
+        
+        # 添加數值文字標籤
+        ax[i].text(last_date + 0.2,
+                last_value*1.01,
+                f'{round(last_value)}',
+                fontsize=20,
+                color=color,
+                fontweight='bold',
+                )
+
+        # 繪製基準線
+        sorted_df = df.sort_values(by='Time')
+        start_x_position = sorted_df.iloc[0]['Time']
+        end_x_position = sorted_df.iloc[-1]['Time']
+        ax[i].plot([start_x_position, end_x_position],
+                [100, 100],
+                color='black',
+                alpha=1,
+                linestyle="--",
+                linewidth=1.5,
+                )
+        
+        # 以較淺的顏色繪製其他群組的線條
+        other_groups = df['unit'].unique()[df['unit'].unique() != group]
+        for other_group in other_groups:
+            other_filtered_df = df[df['unit'] == other_group]
+            other_y = other_filtered_df['value']
+            other_x = other_filtered_df['Time']
+            # 使用相同領域的顏色，但降低透明度
+            ax[i].plot(other_x, other_y, color=color, alpha=0.5, linewidth=2)
+
+        # 移除邊框
+        ax[i].spines[['right', 'top', 'left', 'bottom']].set_visible(False)
+        
+        # 為每個子圖添加粗體標題
+        ax[i].set_title(f'{group}', fontsize=40, fontweight='bold')  # 加入領域資訊
+        
+        # 移除座標軸標籤
+        ax[i].set_yticks([])
+        ax[i].set_xticks([])
+
+    # 隱藏多餘的子圖（第26張之後的）
+    for i in range(num_countries, len(ax)):
+        ax[i].set_visible(False)
+
+    # 調整佈局和間距
+    plt.tight_layout(rect=[-0.3, 0, 0, 0])
+
+    # 顯示圖表
+    plt.show()
+```
+
+```{python}
+#| eval: true
+plot_spaghetti_all(tab_N, "公立")
+```
+
+```{python}
+#| eval: true
+plot_spaghetti_all(tab_N, "私立")
+```
+```{python}
+#| eval: true
+plot_spaghetti_all(tab_N, "研究型")
+```
+
+
+#### 按領域呈現
+
+
+```{python}
+#| eval: true
+def plot_spaghetti2(dframe, domain):
+    df = dframe.copy()
+    df = df.query("學校類別 == '一般大學'")
+
+    df.rename(
+    columns={"學年度": "Time", "學門名稱": "unit", "人數百分比": "value"},
+    inplace=True,
+    )
+    group_sort = df[df["Time"] == 118].sort_values(by=["value"], ascending=True).reset_index(drop=True).reset_index(names=["grpsort"])
+    df = df.merge(group_sort[["學門代碼", "grpsort"]], how="left", on="學門代碼")
+    df = (df
+        .sort_values(by=["grpsort", "Time"], ascending=True)
+        .reset_index(drop=True)
+        )
+    df_all = df.copy()
+    df = df.query("領域名稱 in @domain")
+
+    # 獲取唯一的領域數量，用於建立顏色映射
+    unique_domains = df['unit'].unique()
+    num_domains = len(unique_domains)
+    # domain_colors = dict(zip(unique_domains, sns.color_palette("Set1", len(unique_domains))))
+    base_colors = [
+        '#4C72B0',  # 深藍色
+        '#DD8452',  # 磚紅色
+        '#55A868',  # 森林綠
+        '#C44E52',  # 暗紅色
+        '#8172B3',  # 紫羅蘭
+        '#937860',  # 棕褐色
+        '#6C7A89',  # 石板灰
+        '#CCB974',  # 暖金色
+        '#64B5CD',  # 青藍色
+        '#A0522D',  # 赭石色
+        '#566573'   # 深灰藍
+    ]
+
+    # 自動調整顏色數量
+    if num_domains <= len(base_colors):
+        print_friendly_colors = base_colors[:num_domains]
+    else:
+        # 如果需要更多顏色，使用colormap自動生成
+        print_friendly_colors = sns.color_palette("husl", num_domains)
+
+    domain_colors = dict(zip(unique_domains, print_friendly_colors))
+
+    # 自動計算最佳的列數和行數
+    num_countries = len(df['unit'].unique())
+    # 自動計算最佳的列數和行數
+    num_countries = len(df['unit'].unique())
+    ncols = 2  # 固定每行3個圖
+    nrows = int(np.ceil(num_countries / ncols))  # 根據總數計算所需行數
+
+    # 根據行列數調整圖形大小
+    # 每個子圖的基礎大小
+    base_width = 8
+    base_height = 6
+    fig, ax = plt.subplots(nrows, ncols, 
+                        figsize=(base_width * ncols, base_height * nrows), 
+                        dpi=300)
+
+
+    # 在整個圖表頂部添加大標題
+    # 建立 sch_type 對應的顏色字典
+    type_colors = {
+        '公立': '#7fc97f',    
+        '私立': '#beaed4',    
+        '研究型': '#fdc086',      
+    }
+
+    titletext = "&".join(f"{item}" for item in domain)
+    fig.text(0.1, 0.9, f"{titletext}",  # 第一部分文字
+         fontsize=60,
+         fontweight='bold',
+         ha='center',
+         va='top',
+         color='black',  # 黑色
+        )
+   
+    # 將ax轉換為一維數組
+    ax = ax.flatten()
+
+    # 在子圖中繪製每個群組
+    for i, group in enumerate(df['unit'].unique()):
+        # 篩選特定群組的數據
+        filtered_df = df[df['unit'] == group].sort_values(by='Time').reset_index(drop=True)
+        x = filtered_df['Time']
+        y = filtered_df['value']
+        
+        # 獲取該國家的領域
+        domain = filtered_df['unit'].iloc[0]
+        # 根據領域選擇顏色
+        color = domain_colors[domain]
+
+        # 獲取該群組的最新值
+        sorted_df = filtered_df
+        last_value = sorted_df.iloc[-1]['value']
+        last_date = sorted_df.iloc[-1]['Time']
+
+        # 設定每個子圖的背景顏色
+        ax[i].set_facecolor('seashell')
+        fig.set_facecolor('seashell')
+        
+        # 繪製主要線條
+        ax[i].plot(x, y, color=color, marker="o",linewidth=6)
+        
+        # 添加最終值的點
+        ax[i].plot(last_date,
+                last_value,
+                marker='o',
+                markersize=10,
+                color=color,
+                )
+        
+        # 添加數值文字標籤
+        ax[i].text(last_date + 0.2,
+                last_value*1.01,
+                f'{round(last_value)}',
+                fontsize=32,
+                color=color,
+                fontweight='bold',
+                )
+
+        # 繪製基準線
+        sorted_df = df.sort_values(by='Time')
+        start_x_position = sorted_df.iloc[0]['Time']
+        end_x_position = sorted_df.iloc[-1]['Time']
+        ax[i].plot([start_x_position, end_x_position],
+                [100, 100],
+                color='black',
+                alpha=0.9,
+                linestyle="--",
+                linewidth=2,
+                )
+        
+        # 以較淺的顏色繪製其他群組的線條
+        other_groups = df_all['unit'].unique()[df_all['unit'].unique() != group]
+        for other_group in other_groups:
+            other_filtered_df = df_all[df_all['unit'] == other_group]
+            other_y = other_filtered_df['value']
+            other_x = other_filtered_df['Time']
+            # 使用相同領域的顏色，但降低透明度
+            ax[i].plot(other_x, other_y, color=color, alpha=0.4, linewidth=2)
+
+        # 移除邊框
+        ax[i].spines[['right', 'top', 'left', 'bottom']].set_visible(False)
+        
+        # 為每個子圖添加粗體標題
+        ax[i].set_title(f'{group}', fontsize=40, fontweight='bold')  # 加入領域資訊
+        
+        # 移除座標軸標籤
+        ax[i].set_yticks([])
+        ax[i].set_xticks([])
+
+    # 隱藏多餘的子圖（第26張之後的）
+    for i in range(num_countries, len(ax)):
+        ax[i].set_visible(False)
+
+    # 調整佈局和間距
+    plt.tight_layout(rect=[-0.6, 0, 0.8, 0.8])
+
+    # 顯示圖表
+    plt.show()
+```
+
+```{python}
+#| eval: true
+# 預估人數表
+grps = ["學年度", "學校類別", "領域代碼", "領域名稱", "學門代碼", "學門名稱"]
+tab_N2 = sim_df.groupby(grps).agg({"pseudoID": "count", "over65": ["sum", "mean"]}).reset_index()
+tab_N2.columns = grps + ["總人數", "超過65歲人數", "超過65歲比例"]
+
+tab_N2["預估人數"] = tab_N2.apply(lambda x: x["總人數"] if x["學年度"] <= 113 else x["總人數"] - x["超過65歲人數"], axis=1)
+
+totalN_earliest = tab_N2.loc[tab_N2.groupby(grps[1:])["學年度"].idxmin(), grps[1:] + ["總人數"]]
+totalN_earliest.rename(columns={"總人數": "最早年度人數"}, inplace=True)
+
+tab_N2 = tab_N2.merge(totalN_earliest, how="left", on=grps[1:])
+tab_N2["人數百分比"] = round((tab_N2["預估人數"] / tab_N2["最早年度人數"])*100, 2)
+```
+
+
+
+```{python}
+#| eval: true
+plot_spaghetti2(tab_N2, domain=["工程、製造及營建領域"])
+```
+
+
+```{python}
+#| eval: true
+plot_spaghetti2(tab_N2, domain=["資訊通訊科技領域", "醫藥衛生及社會福利領域"])
+```
+
+```{python}
+#| eval: true
+plot_spaghetti2(tab_N2,  domain=['自然科學、數學及統計領域', '農業、林業、漁業及獸醫領域'])
+```
+
+```{python}
+#| eval: true
+plot_spaghetti2(tab_N2,  domain=['教育領域', '社會科學、新聞學及圖書資訊領域'])
+```
+
+```{python}
+#| eval: true
+plot_spaghetti2(tab_N2,  domain=['藝術及人文領域'])
+```
+
+```{python}
+#| eval: true
+plot_spaghetti2(tab_N2,  domain=['商業、管理及法律領域', '服務領域', '其他領域'])
+```
+
+
+#### 細看工業學門
+
+
+```{python}
+#| eval: true
+def plot_spaghetti_engineering(dframe, domain):
+    df = dframe.copy()
+    df = df.query("學校類別 == '一般大學' & 學門名稱 in @domain")
+
+    df.rename(
+    columns={"學年度": "Time", "學類名稱": "unit", "人數百分比": "value"},
+    inplace=True,
+    )
+    group_sort = df[df["Time"] == 118].sort_values(by=["value"], ascending=True).reset_index(drop=True).reset_index(names=["grpsort"])
+    df = df.merge(group_sort[["學類代碼", "grpsort"]], how="left", on="學類代碼")
+    df = (df
+        .sort_values(by=["grpsort", "Time"], ascending=True)
+        .reset_index(drop=True)
+        )
+    df_all = df.copy()
+    # df = df.query("學門名稱 in @domain")
+
+    # 獲取唯一的領域數量，用於建立顏色映射
+    unique_domains = df['unit'].unique()
+    num_domains = len(unique_domains)
+    # domain_colors = dict(zip(unique_domains, sns.color_palette("Set1", len(unique_domains))))
+    base_colors = [
+        '#4C72B0',  # 深藍色
+        '#DD8452',  # 磚紅色
+        '#55A868',  # 森林綠
+        '#C44E52',  # 暗紅色
+        '#8172B3',  # 紫羅蘭
+        '#937860',  # 棕褐色
+        '#6C7A89',  # 石板灰
+        '#CCB974',  # 暖金色
+        '#64B5CD',  # 青藍色
+        '#A0522D',  # 赭石色
+        '#566573'   # 深灰藍
+    ]
+
+    # 自動調整顏色數量
+    if num_domains <= len(base_colors):
+        print_friendly_colors = base_colors[:num_domains]
+    else:
+        # 如果需要更多顏色，使用colormap自動生成
+        print_friendly_colors = sns.color_palette("husl", num_domains)
+
+    domain_colors = dict(zip(unique_domains, print_friendly_colors))
+
+    # 自動計算最佳的列數和行數
+    num_countries = len(df['unit'].unique())
+    # 自動計算最佳的列數和行數
+    num_countries = len(df['unit'].unique())
+    ncols = 2  # 固定每行2個圖
+    nrows = int(np.ceil(num_countries / ncols))  # 根據總數計算所需行數
+
+    # 根據行列數調整圖形大小
+    # 每個子圖的基礎大小
+    base_width = 8
+    base_height = 6
+    fig, ax = plt.subplots(nrows, ncols, 
+                        figsize=(base_width * ncols, base_height * nrows), 
+                        dpi=300)
+
+
+    # 在整個圖表頂部添加大標題
+    # 建立 sch_type 對應的顏色字典
+    type_colors = {
+        '公立': '#7fc97f',    
+        '私立': '#beaed4',    
+        '研究型': '#fdc086',      
+    }
+
+    titletext = "&".join(f"{item}" for item in domain)
+    fig.text(0.4, 0.95, f"{titletext}",  # 第一部分文字
+         fontsize=60,
+         fontweight='bold',
+         ha='center',
+         va='top',
+         color='black'  # 黑色
+        )
+
+
+    # 設定圖表右側的說明文字
+    paragraph_text = ""
+    fig.text(0.55, 0.9,
+            paragraph_text,
+            fontsize=12,
+            va='top',
+            ha='left'
+            )
+
+    # 將ax轉換為一維數組
+    ax = ax.flatten()
+
+    # 在子圖中繪製每個群組
+    for i, group in enumerate(df['unit'].unique()):
+        # 篩選特定群組的數據
+        filtered_df = df[df['unit'] == group].sort_values(by='Time').reset_index(drop=True)
+        x = filtered_df['Time']
+        y = filtered_df['value']
+        
+        # 獲取該國家的領域
+        domain = filtered_df['unit'].iloc[0]
+        # 根據領域選擇顏色
+        color = domain_colors[domain]
+
+        # 獲取該群組的最新值
+        sorted_df = filtered_df
+        last_value = sorted_df.iloc[-1]['value']
+        last_date = sorted_df.iloc[-1]['Time']
+
+        # 設定每個子圖的背景顏色
+        ax[i].set_facecolor('seashell')
+        fig.set_facecolor('seashell')
+        
+        # 繪製主要線條
+        ax[i].plot(x, y, color=color, marker="o", linewidth=4,)
+        
+        # 添加最終值的點
+        ax[i].plot(last_date,
+                last_value,
+                marker='o',
+                markersize=12,
+                color=color,
+                )
+        
+        # 添加數值文字標籤
+        ax[i].text(last_date + 0.2,
+                last_value*1.01,
+                f'{round(last_value)}',
+                fontsize=30,
+                color=color,
+                fontweight='bold',
+                )
+
+        # 繪製基準線
+        sorted_df = df.sort_values(by='Time')
+        start_x_position = sorted_df.iloc[0]['Time']
+        end_x_position = sorted_df.iloc[-1]['Time']
+        ax[i].plot([start_x_position, end_x_position],
+                [100, 100],
+                color='black',
+                alpha=0.9,
+                linestyle="--",
+                linewidth=1.5,
+                )
+        
+        # 以較淺的顏色繪製其他群組的線條
+        other_groups = df_all['unit'].unique()[df_all['unit'].unique() != group]
+        for other_group in other_groups:
+            other_filtered_df = df_all[df_all['unit'] == other_group]
+            other_y = other_filtered_df['value']
+            other_x = other_filtered_df['Time']
+            # 使用相同領域的顏色，但降低透明度
+            ax[i].plot(other_x, other_y, color=color, alpha=0.5, linewidth=3)
+
+        # 移除邊框
+        ax[i].spines[['right', 'top', 'left', 'bottom']].set_visible(False)
+        
+        # 為每個子圖添加粗體標題
+        ax[i].set_title(f'{group}', fontsize=40, pad=20, fontweight='bold')  # 加入領域資訊
+        
+        # 移除座標軸標籤
+        ax[i].set_yticks([])
+        ax[i].set_xticks([])
+
+    # 隱藏多餘的子圖（第26張之後的）
+    for i in range(num_countries, len(ax)):
+        ax[i].set_visible(False)
+
+    # 調整佈局和間距
+    plt.tight_layout(rect=[0, 0, 1, 0.9])
+
+    # 顯示圖表
+    plt.show()
+```
+
+
+```{python}
+#| eval: true
+# 預估人數表
+grps = ["學年度", "學校類別", "學門代碼", "學門名稱", "學類代碼", "學類名稱"]
+tab_engineering = sim_df.groupby(grps).agg({"pseudoID": "count", "over65": ["sum", "mean"]}).reset_index()
+tab_engineering.columns = grps + ["總人數", "超過65歲人數", "超過65歲比例"]
+
+tab_engineering["預估人數"] = tab_engineering.apply(lambda x: x["總人數"] if x["學年度"] <= 113 else x["總人數"] - x["超過65歲人數"], axis=1)
+
+totalN_earliest = tab_engineering.loc[tab_engineering.groupby(grps[1:])["學年度"].idxmin(), grps[1:] + ["總人數"]]
+totalN_earliest.rename(columns={"總人數": "最早年度人數"}, inplace=True)
+
+tab_engineering = tab_engineering.merge(totalN_earliest, how="left", on=grps[1:])
+tab_engineering["人數百分比"] = round((tab_engineering["預估人數"] / tab_engineering["最早年度人數"])*100, 2)
+```
+
+```{python}
+#| eval: true
+plot_spaghetti_engineering(tab_engineering,  domain=["工程及工程業學門"])
+```
+

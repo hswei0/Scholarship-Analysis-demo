@@ -1,0 +1,876 @@
+---
+jupyter: python3
+---
+
+此檔案旨在分析普大各「細學類」的師資結構與學生人數狀況，以找出未來可能面臨師資斷層或人力需求的領域，結果檔輸出至`report/0305`。主要分析面向包含：
+
+* 高齡師資分析：計算現有師資的年齡分佈，並預估五年後的教師退休缺額。
+* 師資學歷背景：分析教師持有國內或國外博士學位的比例。
+* 生源分析：統計各學類的學士班與博士班畢業生人數，作為潛在的師資來源。
+* 綜合指標建立與排名：結合上述數據，建立一個綜合排名，以識別哪些學類最需要關注。
+
+
+```{python}
+
+import numpy as np
+import pandas as pd
+from pathlib import Path
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from src.employee_data_processor import analyze_employee_changes 
+from src.data_clean import read_table_with_code_columns # 用來讀系所代碼
+
+home_pth = Path.cwd().parents[0]
+# 設定顯示小數點位數
+pd.options.display.precision = 2
+plt.rcParams['font.family'] = ['Noto Sans CJK TC']  
+
+# 轉為百分比
+def as_percentage(dtframe):
+    df = dtframe.copy()
+
+    def format_value(x):
+        if isinstance(x, float):
+            if np.isnan(x):
+                return "nan"
+            elif x.is_integer():
+                 return str(int(x))
+            else:
+                return f"{int(x * 100)}%"
+        elif isinstance(x, int):
+             return str(x)
+        elif isinstance(x, str) and x.lower() == "nan":
+                return "nan"
+        else:
+            return str(x)
+
+    df = df.applymap(format_value)
+    return df
+```
+
+**國內博士班代碼**
+
+使用105-111博士班代碼
+
+```{python}
+def merge_csv_files(directory):
+    """
+    合併指定目錄下的所有 CSV 文件
+
+    Args:
+        directory: 目錄路徑
+
+    Returns:
+        合併後的 DataFrame
+    """
+
+    all_files = list(Path(directory).glob('*.csv'))  
+    df_from_each_file = (pd.read_csv(f, dtype=object) for f in all_files)
+    combined_df = pd.concat(df_from_each_file, ignore_index=True)
+    return combined_df
+
+directory_path = home_pth.joinpath("raw/博士班代碼") 
+phdcode_df = merge_csv_files(directory_path)
+phdcode_df = phdcode_df.iloc[:, range(3, 11)]
+# 刪除重複的校系名稱
+phdcode_df.drop_duplicates(subset=["學校代碼", "科系名稱"], inplace=True)
+
+# 拆分名稱和代碼
+def split_field_code_name(df, category="領域"):
+    """
+    將包含代碼和名稱的欄位分割成兩個獨立欄位
+    
+    Parameters:
+    -----------
+    df : pandas.DataFrame
+        輸入的 DataFrame
+    column_name : str
+        要分割的原始欄位名稱 (例如: '學門領域代碼/名稱')
+    code_col_name : str
+        新的代碼欄位名稱 (例如: '學門領域代碼')
+    name_col_name : str
+        新的名稱欄位名稱 (例如: '學門領域名稱')
+    
+    Returns:
+    --------
+    pandas.DataFrame
+        包含新增分割欄位的 DataFrame
+    """
+    # 建立 DataFrame 複本以避免修改原始資料
+    result_df = df.copy()
+    
+    # 使用空格分割欄位
+    split_series = result_df[f"{category}代碼/名稱"].str.split(' ', n=1, expand=True, )
+    
+    # 新增分割後的欄位
+    result_df[f"{category}代碼"] = split_series[0]
+    result_df[f"{category}名稱"] = split_series[1]
+    
+    return result_df
+
+phdcode_df = split_field_code_name(phdcode_df, "領域")
+phdcode_df = split_field_code_name(phdcode_df, "學門")
+phdcode_df = split_field_code_name(phdcode_df, "學類")
+phdcode_df = split_field_code_name(phdcode_df, "細學類")
+
+phdcode_df.drop(
+    [col for col in phdcode_df.columns if col.endswith("代碼/名稱")],
+    axis=1, 
+    inplace=True
+)
+```
+
+```{python}
+file_path = home_pth.joinpath("using_data/L2/faculty.csv")
+df_headers = pd.read_csv(file_path,
+                        nrows=0)
+# 找出所有包含「代碼」的欄位名稱
+code_columns = [col for col in df_headers.columns if "代碼" in col]
+# 建立 dtype 字典，將特定欄位設定為字串格式
+dtype_dict = {col: "str" for col in code_columns}
+faculty = pd.read_csv(file_path, dtype=dtype_dict)
+```
+
+```{python}
+# 篩選條件
+position_type = "編制內"
+semester = 1 
+mask = "`編制內外` == @position_type & `學期` == @semester & `學校類別` != '宗教研修學院' & `專兼任` == '專任' & 學校類別 == '一般大學'"
+using_df = faculty.query(mask)
+```
+
+```{python}
+# 編制外人員
+temporary = faculty[faculty["編制內外"] == "編制外"][["領域代碼", "pseudoID"]]
+temporaryID = temporary["領域代碼"] + "_" + temporary["pseudoID"]
+
+partime = faculty[faculty["專兼任"] == "兼任"][["領域代碼", "pseudoID"]]
+partimeID = partime["領域代碼"] + "_" + partime["pseudoID"]
+```
+
+```{python}
+# using_df, new_emps, leaving_emps, first_app, yearly_stats = analyze_employee_changes(
+#     using_df,
+#     domain_column="領域名稱"
+# )
+
+using_df = faculty.copy()
+# 將研究型大學加入設立別比較
+using_df["設立別"] = using_df.apply(lambda x: "研究型" if x["研究型大學"] else x["設立別"], axis=1)
+using_df["over65"] =  using_df["年齡"] > 65
+using_df["over65_af5"] =  using_df["年齡"] > 60
+using_df["fid"] = using_df["領域代碼"] + "_" + using_df["pseudoID"]
+# using_df["退休離開"] = (using_df["年齡"] >= 65) & using_df["是否離開"]
+# 新進來源
+local_sch = phdcode_df["學校名稱"].unique()
+# 手動加入
+local_sch = local_sch.tolist() + ["臺北市立體育學院", "中興大學", "國立屏東科技大學", "國立師範大學", "師範大學", "國立體育學院", "體育學院"
+                                  ]
+local_sch_blurr = pd.Series(local_sch).str.replace("國立", "")
+local_keyword = "|".join(["國內", "私立", "臺灣", "台灣", "台北", "花蓮", "新竹", "臺北", "高雄", "台南", "臺南", "彰化", "屏東", "台中", "臺中",
+                          "嘉義", "台東", "臺東", "林口"])
+mk1 = (using_df["最高學歷學校"].isin(local_sch))
+mk2 = (using_df["最高學歷學校"].isin(local_sch_blurr))
+mk3 = (using_df["最高學歷學校"].isin(using_df["學校名稱"].unique()))
+mk4 = (using_df["最高學歷學校"].str.contains(local_keyword))
+using_df["local_phd"] =  mk1 | mk2 | mk3 | mk4  
+using_df["from_temporary"] = using_df["fid"].isin(temporaryID)
+using_df["from_partime"] = using_df["fid"].isin(partimeID)
+
+using_df.reset_index(names="tempID", inplace=True)
+
+# using_df.rename(
+#     columns={col: f"領域_{col}" for col in ['是否新進', '是否離開']},
+#     inplace=True
+# )
+```
+
+### 高齡教師年齡比
+
+```{python}
+# 篩選條件
+position_type = "編制內"
+semester = 1 
+mask = "學年度 == 113 & `編制內外` == @position_type & `學期` == @semester & `學校類別` != '宗教研修學院' & `專兼任` == '專任' & 學校類別 == '一般大學'"
+using_df1 = using_df.query(mask)
+```
+
+```{python}
+# 113學年度一般大學編制內專任教師總人數
+tb1_0 = pd.pivot_table(
+    using_df1,
+    values="tempID",
+    index=["學門名稱", "細學類名稱"],
+    aggfunc="count",
+    fill_value=0
+)
+# 工程及工程業學門項下學類
+# tb1_0_1 = pd.pivot_table(
+#     using_df1[using_df1["學門名稱"] == "工程及工程業學門"],
+#     values="tempID",
+#     index="學類名稱",
+#     aggfunc="count",
+#     fill_value=0
+    
+# )
+# tb1_0 = pd.concat([tb1_0, tb1_0_1], axis=0)
+tb1_0.columns = ["總人數"]
+```
+
+```{python}
+# 113學年度一般大學編制內專任教師人數
+tb1_1 = pd.pivot_table(
+    using_df1,
+    values="tempID",
+    index=["學門名稱", "細學類名稱"],
+    columns="設立別",
+    aggfunc="count",
+    fill_value=0
+)
+# 工程及工程業學門項下學類
+# tb1_1_1 = pd.pivot_table(
+#     using_df1[using_df1["學門名稱"] == "工程及工程業學門"],
+#     values="tempID",
+#     index="學類名稱",
+#     columns="設立別",
+#     aggfunc="count",
+#     fill_value=0
+    
+# )
+# tb1_1 = pd.concat([tb1_1, tb1_1_1], axis=0)
+```
+
+```{python}
+# 113學年度65歲以上教師人數
+tb1_2 = pd.pivot_table(
+    using_df1[using_df1["over65"]],
+    values="tempID",
+    index=["學門名稱", "細學類名稱"],
+    columns="設立別",
+    aggfunc="count",
+    fill_value=0
+)
+# 工程及工程業學門項下學類
+# tb1_2_1 = pd.pivot_table(
+#     using_df1[(using_df1["over65"]) & (using_df1["學門名稱"] == "工程及工程業學門")],
+#     values="tempID",
+#     index="學類名稱",
+#     columns="設立別",
+#     aggfunc="count",
+#     fill_value=0
+    
+# )
+# tb1_2 = pd.concat([tb1_2, tb1_2_1], axis=0)
+```
+
+```{python}
+# 118學年度預估65歲以上教師人數
+tb1_3 = pd.pivot_table(
+    using_df1[using_df1["over65_af5"]],
+    values="tempID",
+    index=["學門名稱", "細學類名稱"],
+    columns="設立別",
+    aggfunc="count",
+    fill_value=0
+)
+# 工程及工程業學門項下學類
+# tb1_3_1 = pd.pivot_table(
+#     using_df1[(using_df1["over65_af5"]) & (using_df1["學門名稱"] == "工程及工程業學門")],
+#     values="tempID",
+#     index="學類名稱",
+#     columns="設立別",
+#     aggfunc="count",
+#     fill_value=0
+    
+# )
+# tb1_3 = pd.concat([tb1_3, tb1_3_1], axis=0)
+```
+
+```{python}
+# 118學年度預估65歲以上教師缺額%
+tb1_4 = pd.pivot_table(
+    using_df1,
+    values="over65_af5",
+    index=["學門名稱", "細學類名稱"],
+    columns="設立別",
+    aggfunc="mean",
+    fill_value=0
+)
+# 工程及工程業學門項下學類
+# tb1_4_1 = pd.pivot_table(
+#     using_df1[using_df1["學門名稱"] == "工程及工程業學門"],
+#     values="over65_af5",
+#     index="學類名稱",
+#     columns="設立別",
+#     aggfunc="mean",
+#     fill_value=0
+    
+# )
+# tb1_4 = pd.concat([tb1_4, tb1_4_1], axis=0)
+tb1_4 = as_percentage(tb1_4)
+```
+
+```{python}
+# 設定欄位名稱
+tb1_1x = pd.concat([tb1_0, tb1_1], axis=1)
+tb1_1x.columns = pd.MultiIndex.from_product(
+    [["113學年度一般大學編制內專任教師人數"],
+    tb1_1x.columns
+    ]
+)
+
+tb1_2.columns = pd.MultiIndex.from_product(
+    [["113學年度65歲以上教師人數"],
+    tb1_2.columns
+    ]
+)
+
+tb1_3.columns = pd.MultiIndex.from_product(
+    [["118學年度預估65歲以上教師人數(取113學年度60歲以上的教師人數，遇缺不補前提)"],
+    tb1_3.columns
+    ]
+)
+
+tb1_4.columns = pd.MultiIndex.from_product(
+    [["118學年度預估65歲以上教師缺額%(取113學年度60歲以上的教師人數/113學年度總人數，遇缺不補前提)"],
+    tb1_4.columns
+    ]
+)
+```
+
+```{python}
+# 合併表格
+tb1 = pd.concat([tb1_1x, tb1_2, tb1_3, tb1_4], axis=1)
+tb1 = tb1.reset_index()
+```
+
+
+### 國內外博士人數比
+
+```{python}
+# 篩選條件
+mask = "`學期` == 1 & `學校類別` != '宗教研修學院' & 學校類別 == '一般大學' & `專兼任` == '專任'"
+using_df2 = using_df.query(mask)
+```
+
+```{python}
+# 編制內專任總人數
+position_type = "編制內"
+mask_temp = "`編制內外` == @position_type"
+tb2_1 = pd.pivot_table(
+    using_df2.query(mask_temp),
+    values="local_phd",
+    index=["學年度", "學門名稱", "細學類名稱"],
+    aggfunc=["count", "sum", lambda x: (~x).sum()],
+    fill_value=0
+)
+tb2_1.columns = tb2_1.columns.set_levels(
+    [f'一般大學{position_type}專任' + item for item in ['總人數', '國內博士學位', '國外博士學位']], 
+    level=0
+)
+tb2_1.columns = tb2_1.columns.get_level_values(0)
+```
+
+```{python}
+# 編制外專任總人數
+position_type = "編制外"
+mask_temp = "`編制內外` == @position_type"
+tb2_2 = pd.pivot_table(
+    using_df2.query(mask_temp),
+    values="local_phd",
+    index=["學年度", "學門名稱", "細學類名稱"],
+    aggfunc=["count", "sum", lambda x: (~x).sum()],
+    fill_value=0
+)
+tb2_2.columns = tb2_2.columns.set_levels(
+    [f'一般大學{position_type}專任' + item for item in ['總人數', '國內博士學位', '國外博士學位']], 
+    level=0
+)
+tb2_2.columns = tb2_2.columns.get_level_values(0)
+```
+
+```{python}
+# 設立別編制內專任總人數
+position_type = "編制內"
+mask_temp = "`編制內外` == @position_type"
+tb2_3 = pd.pivot_table(
+    using_df2.query(mask_temp),
+    values="local_phd",
+    index=["學年度", "學門名稱", "細學類名稱"],
+    columns="設立別",
+    aggfunc=["count", "sum", lambda x: (~x).sum()],
+    fill_value=0
+)
+tb2_3.columns = tb2_3.columns.set_levels(
+    [f'一般大學{position_type}專任' + item for item in ['總人數', '國內博士學位', '國外博士學位']], 
+    level=0
+)
+tb2_3 = tb2_3.swaplevel(0, 1, axis=1)
+tb2_3.columns = ['_'.join(col) for col in tb2_3.columns]
+```
+
+```{python}
+# 設立別編制外專任總人數
+position_type = "編制外"
+mask_temp = "`編制內外` == @position_type"
+tb2_4 = pd.pivot_table(
+    using_df2.query(mask_temp),
+    values="local_phd",
+    index=["學年度", "學門名稱", "細學類名稱"],
+    columns="設立別",
+    aggfunc=["count", "sum", lambda x: (~x).sum()],
+    fill_value=0
+)
+tb2_4.columns = tb2_4.columns.set_levels(
+    [f'一般大學{position_type}專任' + item for item in ['總人數', '國內博士學位', '國外博士學位']], 
+    level=0
+)
+tb2_4 = tb2_4.swaplevel(0, 1, axis=1)
+tb2_4.columns = ['_'.join(col) for col in tb2_4.columns]
+```
+
+```{python}
+# 合併表格
+tb2 = pd.concat([tb2_1, tb2_2, tb2_3, tb2_4], axis=1)
+```
+
+### 國內博士班在學人數
+
+* 一般大學、博士班
+
+```{python}
+phdstu = pd.read_csv(
+    home_pth.joinpath("using_data/L1/博士班畢業人數.csv"),
+    dtype={"學校統計處代碼": object, "系所代碼": object}
+)
+# 研究型大學
+RschU = (using_df
+         .query("學校類別 == '一般大學' & 研究型大學")
+         .drop_duplicates(subset=["學校統計處代碼"])
+         .loc[:, ["學校統計處代碼", "研究型大學"]])
+
+phdstu["研究型大學"] = phdstu["學校統計處代碼"].isin(RschU["學校統計處代碼"])
+phdstu["設立別"] = phdstu.apply(lambda x: "研究型" if x["研究型大學"] else x["設立別"], axis=1)
+# 併入代碼表
+moe_code = read_table_with_code_columns(
+    home_pth.joinpath("using_data/L1/學門代碼表.csv")
+)
+phdstu["細學類代碼"] = phdstu["系所代碼"].str.slice(0, 5)
+phdstu = phdstu.merge(moe_code, how="left", on="細學類代碼", indicator=True)
+# N_leftonly = sum(phdstu["_merge"] == "left_only")
+# print(f"沒有代碼科系數量：{N_leftonly}")
+
+# 併入代碼
+# phdstu = phdstu.merge(phdcode_df, how="left", left_on="系所代碼", right_on="科系代碼",indicator=True)
+
+```
+
+```{python}
+tb3 = pd.pivot_table(
+    phdstu,
+    values="畢業生數小計",
+    index=["學年度", "學門名稱", "細學類名稱"],
+    aggfunc="sum",
+    fill_value=0
+)
+```
+
+
+### 國內學士班畢業人數
+
+* 一般大學、日間部+進修部
+
+```{python}
+# 學士班人數
+bastu = pd.read_csv(
+    home_pth.joinpath("using_data/L1/學士班畢業人數.csv"),
+    dtype={"學校統計處代碼": object, "系所代碼": object}
+)
+# 研究型大學
+bastu["研究型大學"] = bastu["學校統計處代碼"].isin(RschU["學校統計處代碼"])
+bastu["設立別"] = bastu.apply(lambda x: "研究型" if x["研究型大學"] else x["設立別"], axis=1)
+
+# 併入代碼表
+moe_code = read_table_with_code_columns(
+    home_pth.joinpath("using_data/L1/學門代碼表.csv")
+)
+bastu["細學類代碼"] = bastu["系所代碼"].str.slice(0, 5)
+bastu = bastu.merge(moe_code, how="left", on="細學類代碼", indicator=True)
+# N_leftonly = sum(bastu["_merge"] == "left_only")
+# print(f"沒有代碼科系數量：{N_leftonly}")
+
+# 併入代碼
+# phdstu = phdstu.merge(phdcode_df, how="left", left_on="系所代碼", right_on="科系代碼",indicator=True)
+
+```
+
+```{python}
+tb4 = pd.pivot_table(
+    bastu,
+    values="畢業生數小計",
+    index=["學年度", "學門名稱", "細學類名稱"],
+    aggfunc="sum",
+    fill_value=0
+)
+```
+
+
+### 細學類統整
+
+```{python}
+
+mask = "`編制內外` == '編制內' & `學期` == 1 & `學校類別` != '宗教研修學院' & `專兼任` == '專任' & 學校類別 == '一般大學'"
+using_df6 = using_df.copy().query(mask)
+tb6_inx = ["學年度", "領域名稱", "學門名稱", "細學類名稱", "細學類代碼"]
+tb6_1 = pd.pivot_table(
+    using_df6,
+    values="tempID",
+    index=tb6_inx,
+    aggfunc="count",
+    fill_value=0
+)
+tb6_1.columns = ["專任教師總人數"]
+
+tb6_2 = pd.pivot_table(
+    using_df6,
+    values="over65_af5",
+    index=tb6_inx,
+    aggfunc="mean",
+    fill_value=0
+)
+tb6_2.columns = ["113年教師60歲以上佔比"]
+# tb6_2 = as_percentage(tb6_2)
+
+tb6_3 = pd.pivot_table(
+    using_df6,
+    values="學校統計處代碼",
+    index=tb6_inx,
+    aggfunc="nunique",
+    fill_value=0
+)
+tb6_3.columns = ["學校數"]
+
+tb6_4 = pd.pivot_table(
+    using_df6,
+    values="主聘單位統計處系所代碼",
+    index=tb6_inx,
+    aggfunc="nunique",
+    fill_value=0
+)
+tb6_4.columns = ["系所數"]
+
+tb6_5 = pd.pivot_table(
+    using_df2.query("`編制內外` == '編制內'"),
+    values="local_phd",
+    index=tb6_inx,
+    aggfunc=[lambda x: (~x).sum()],
+    fill_value=0
+)
+tb6_5.columns = ["國外學歷教師人數"]
+
+tb6_6 = pd.pivot_table(
+    bastu,
+    values="畢業生數小計",
+    index=tb6_inx,
+    aggfunc="sum",
+    fill_value=0
+)
+tb6_6.columns = ["學士畢業人數"]
+tb6_6_107 = tb6_6.query("學年度 == 107") 
+tb6_6_107.columns = ["學士畢業人數(基期107)"]
+tb6_6_107.reset_index(inplace=True)
+tb6_6_107.drop(columns=["學年度"], inplace=True)
+
+tb6_7 = pd.pivot_table(
+    phdstu,
+    values="畢業生數小計",
+    index=tb6_inx,
+    aggfunc="sum",
+    fill_value=0
+)
+tb6_7.columns = ["博士畢業人數"]
+tb6_7_107 = tb6_7.query("學年度 == 107") 
+tb6_7_107.columns = ["博士畢業人數(基期107)"]
+tb6_7_107.reset_index(inplace=True)
+tb6_7_107.drop(columns=["學年度"], inplace=True)
+
+tb6 = pd.concat([tb6_1, tb6_2, tb6_3, tb6_4, tb6_5, tb6_6, tb6_7], axis=1)
+tb6.reset_index(inplace=True)
+tb6 = tb6.merge(tb6_6_107, how="left")
+tb6 = tb6.merge(tb6_7_107, how="left")
+tb6["國外學歷教師佔比"] = tb6["國外學歷教師人數"] / tb6["專任教師總人數"]
+tb6["學士畢業生變化率"] = (tb6["學士畢業人數"] - tb6["學士畢業人數(基期107)"]) / tb6["學士畢業人數(基期107)"]
+tb6["博士畢業生變化率"] = (tb6["博士畢業人數"] - tb6["博士畢業人數(基期107)"]) / tb6["博士畢業人數(基期107)"]
+tb6["學士生師比"] = tb6["學士畢業人數"] / tb6["專任教師總人數"] 
+# tb6 = as_percentage(tb6)
+```
+
+#### 區分學校設立別
+```{python}
+
+mask = "`編制內外` == '編制內' & `學期` == 1 & `學校類別` != '宗教研修學院' & `專兼任` == '專任' & 學校類別 == '一般大學'"
+using_df6 = using_df.copy().query(mask)
+tb7_inx = ["學年度", "領域名稱", "學門名稱", "細學類名稱", "細學類代碼"]
+tb7_1 = pd.pivot_table(
+    using_df6,
+    values="tempID",
+    index=tb7_inx,
+    columns="設立別",
+    aggfunc="count",
+    fill_value=0
+)
+tb7_1.columns = pd.MultiIndex.from_product([["專任教師總人數"], tb7_1.columns])
+
+
+tb7_2 = pd.pivot_table(
+    using_df6,
+    values="over65_af5",
+    index=tb7_inx,
+    columns="設立別",
+    aggfunc="mean",
+    fill_value=0
+)
+tb7_2.columns = pd.MultiIndex.from_product([["113年教師60歲以上佔比"], tb7_2.columns])
+
+tb7_3 = pd.pivot_table(
+    using_df6,
+    values="學校統計處代碼",
+    index=tb7_inx,
+    columns="設立別",
+    aggfunc="nunique",
+    fill_value=0
+)
+tb7_3.columns = pd.MultiIndex.from_product([["學校數"], tb7_3.columns])
+
+
+tb7_4 = pd.pivot_table(
+    using_df6,
+    values="主聘單位統計處系所代碼",
+    index=tb7_inx,
+    columns="設立別",
+    aggfunc="nunique",
+    fill_value=0
+)
+tb7_4.columns = pd.MultiIndex.from_product([["系所數"], tb7_4.columns])
+
+def count_false(x):
+    return (~x).sum()
+
+tb7_5 = pd.pivot_table(
+    using_df2.query("`編制內外` == '編制內'"),
+    values="local_phd",
+    index=tb7_inx,
+    columns="設立別",
+    aggfunc=[lambda x: (~x).sum()],
+    fill_value=0
+)
+# 重命名列索引，去除"lambda"
+tb7_5.columns = tb7_5.columns.set_levels(["國外學歷教師人數"], level=0)
+
+tb7_6 = pd.pivot_table(
+    bastu,
+    values="畢業生數小計",
+    index=tb7_inx,
+    columns="設立別",
+    aggfunc="sum",
+    fill_value=0
+)
+tb7_6.columns = pd.MultiIndex.from_product([["學士畢業人數"], tb7_6.columns])
+
+tb7_6_107 = tb7_6.query("學年度 == 107") 
+tb7_6_107.columns = tb7_6_107.columns.set_levels(["學士畢業人數(基期107)"], level=0)
+tb7_6_107.reset_index(inplace=True)
+tb7_6_107.drop(columns=["學年度"], inplace=True)
+
+tb7_7 = pd.pivot_table(
+    phdstu,
+    values="畢業生數小計",
+    index=tb7_inx,
+    columns="設立別",
+    aggfunc="sum",
+    fill_value=0
+)
+tb7_7.columns = pd.MultiIndex.from_product([["博士畢業人數"], tb7_7.columns])
+
+tb7_7_107 = tb7_7.query("學年度 == 107") 
+tb7_7_107.columns = tb7_7_107.columns.set_levels(["博士畢業人數(基期107)"], level=0)
+tb7_7_107.reset_index(inplace=True)
+tb7_7_107.drop(columns=["學年度"], inplace=True)
+
+tb7 = pd.concat([tb7_1, tb7_2, tb7_3, tb7_4, tb7_5, tb7_6, tb7_7], axis=1)
+tb7.reset_index(inplace=True)
+tb7 = tb7.merge(tb7_6_107, how="left")
+tb7 = tb7.merge(tb7_7_107, how="left")
+
+# 定義計算結果項目與學校設立別
+result_items = ["國外學歷教師佔比", "學士畢業生變化率", "博士畢業生變化率", "學士生師比"]
+school_types = ["公立", "私立", "研究型"]
+tb7_x = tb7.copy()
+# 迴圈處理三種學校設立別
+for school_type in ["公立", "私立", "研究型"]:
+    tb7_x[("國外學歷教師佔比", school_type)] = tb7[("國外學歷教師人數", school_type)] / tb7[("專任教師總人數", school_type)]
+    tb7_x[("學士畢業生變化率", school_type)] = tb7[("學士畢業人數", school_type)] / tb7[("學士畢業人數(基期107)", school_type)]
+    tb7_x[("博士畢業生變化率", school_type)] = tb7[("博士畢業人數", school_type)] / tb7[("博士畢業人數(基期107)", school_type)]
+    tb7_x[("學士生師比", school_type)] = tb7[("學士畢業人數", school_type)] / tb7[("專任教師總人數", school_type)]
+
+# 重新整理欄位順序，依照 result_items 與 school_types 的順序排序
+tb7_x = tb7_x.reindex(columns=pd.MultiIndex.from_product([result_items, school_types]), fill_value=np.nan)
+tb7 = pd.concat([tb7, tb7_x], axis=1)
+```
+
+
+
+**輸出格式整理**
+
+```{python}
+#| eval: true
+# 學門排序
+main_fields = [
+    '製造及加工學門',
+    '建築及營建工程學門',
+    '工程及工程業學門',
+    '資訊通訊科技學門',
+    '人文學門',
+    '醫藥衛生學門',
+    '藝術學門',
+    '林業學門',
+    '獸醫學門',
+    '物理、化學及地球科學學門',
+    '教育學門',
+    '語文學門',
+    '運輸服務學門',
+    '社會福利學門',
+    '農業學門',
+    '生命科學學門',
+    '數學及統計學門',
+    '商業及管理學門',
+    '新聞學及圖書資訊學門',
+    '社會及行為科學學門',
+    '環境學門',
+    '法律學門',
+    '其他學門',
+    '餐旅及民生服務學門',
+    '漁業學門',
+    '衛生及職業衛生服務學門',
+    '安全服務學門'
+]
+
+
+# tb1 = tb1.reindex(main_fields)  
+
+tb2 = tb2.reset_index()
+# 先定義學門的排序順序
+order_mapping = {field: idx for idx, field in enumerate(main_fields)}
+# 建立排序用的數值列
+tb2['學門順序'] = tb2['學門名稱'].map(order_mapping)
+# 先按學年度升序，再按學門順序升序排列
+tb2 = tb2.sort_values(['學年度', '學門順序'])
+# 移除輔助排序的欄位
+tb2 = tb2.drop('學門順序', axis=1)
+tb2.rename(columns={"學年度": "學年度（下學期）"}, inplace=True)
+
+tb3 = tb3.reset_index()
+# 建立排序用的數值列
+tb3['學門順序'] = tb3['學門名稱'].map(order_mapping)
+# 先按學年度升序，再按學門順序升序排列
+tb3 = tb3.sort_values(['學年度', '學門順序'])
+# 移除輔助排序的欄位
+tb3 = tb3.drop('學門順序', axis=1)
+
+tb4 = tb4.reset_index()
+# 建立排序用的數值列
+tb4['學門順序'] = tb4['學門名稱'].map(order_mapping)
+# 先按學年度升序，再按學門順序升序排列
+tb4 = tb4.sort_values(['學年度', '學門順序'])
+# 移除輔助排序的欄位
+tb4 = tb4.drop('學門順序', axis=1)
+
+tb3.rename(columns={"畢業生數小計": "博士畢業總人數"}, inplace=True)
+tb4.rename(columns={"畢業生數小計": "學士畢業總人數"}, inplace=True)                  
+```
+
+
+```{python}
+# 各年度總人數
+tb5_1 = pd.pivot_table(
+    tb3,
+    values="博士畢業總人數",
+    index="學年度",
+    aggfunc="sum",
+    fill_value=0
+)
+
+tb5_2 = pd.pivot_table(
+    tb4,
+    values="學士畢業總人數",
+    index="學年度",
+    aggfunc="sum",
+    fill_value=0
+)
+
+tb5 = pd.concat([tb5_1, tb5_2], axis=1)
+
+```
+
+### 綜合排序
+```{python}
+tb1_r = tb1.copy()
+# 60以上人數
+tb1_r["公立_60以上人數_排名"] = tb1_r.iloc[:, 9].rank(method="dense", ascending=True)
+tb1_r["研究型_60以上人數_排名"] = tb1_r.iloc[:, 10].rank(method="dense", ascending=True)
+# 缺額率
+tb1_r["公立_缺額率_排名"] = tb1_r.iloc[:, 12].rank(method="dense", ascending=True)
+tb1_r["研究型_缺額率_排名"] = tb1_r.iloc[:, 13].rank(method="dense", ascending=True)
+tb1_r = tb1_r.iloc[:, [0, 1, -1, -2, -3, -4]]
+tb1_r.columns = [''.join(col).strip() for col in tb1_r.columns.values]
+```
+
+```{python}
+tb4_r = tb4.copy()
+tb4_r = tb4_r[tb4_r["學年度"] > 107] # 近5年
+tb4_r = tb4_r.groupby(['學門名稱', '細學類名稱']).agg({"學士畢業總人數":"mean"})
+tb4_r["近五年學士畢業人數_排名"] = tb4_r["學士畢業總人數"].rank(method="dense", ascending=True)
+tb4_r.reset_index(inplace=True)
+tb4_r = tb4_r.iloc[:, [0, 1, -1]]
+```
+
+```{python}
+tb14_r = tb1_r.merge(tb4_r, how="outer", on=["學門名稱", "細學類名稱"])
+tb14_r["公立_人數&缺額率&學士"] = tb14_r["公立_60以上人數_排名"] + tb14_r["公立_缺額率_排名"] + tb14_r["近五年學士畢業人數_排名"] 
+tb14_r["研究型_人數&缺額率&學士"] = tb14_r["研究型_60以上人數_排名"] + tb14_r["研究型_缺額率_排名"] + tb14_r["近五年學士畢業人數_排名"] 
+tb14_r["公立_人數&缺額率&學士_排名"] = tb14_r["公立_人數&缺額率&學士"].rank(method="dense", ascending=False)
+tb14_r["研究型_人數&缺額率&學士_排名"] = tb14_r["研究型_人數&缺額率&學士"].rank(method="dense", ascending=False)
+```
+
+```{python}
+tb_floder = home_pth.joinpath("report/0220")
+tb14_r.to_excel(tb_floder.joinpath("細學類排名.xlsx"), index=False)
+```
+
+```{python}
+#| eval: false
+# 表格輸出
+tb_floder = home_pth.joinpath("report/0220")
+
+xfile = tb_floder.joinpath("細學類表格.xlsx")
+with pd.ExcelWriter(xfile) as writer:
+    tb1.to_excel(writer, sheet_name='高齡教師年齡比', index=True)
+    tb2.to_excel(writer, sheet_name='歷年教師國內外博士', index=False)
+    tb3.to_excel(writer, sheet_name='國內博士畢業生人數', index=False)
+    tb4.to_excel(writer, sheet_name='國內學士畢業生人數', index=False)
+    tb5.to_excel(writer, sheet_name='一般大學歷年畢業生人數', index=True)
+```
+
+
+
+```{python}
+#| eval: true
+# 表格輸出
+tb_floder = home_pth.joinpath("report/0305")
+
+xfile = tb_floder.joinpath("細學類總覽.xlsx")
+with pd.ExcelWriter(xfile) as writer:
+    tb6.to_excel(writer, sheet_name='全體學校', index=False)
+    tb7.to_excel(writer, sheet_name='分設立別', index=True)
+```

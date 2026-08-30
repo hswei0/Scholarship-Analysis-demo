@@ -1,0 +1,964 @@
+---
+title: 公費生資料分析
+jupyter: python3
+execute:
+  echo: false
+  warning: false
+---
+
+```{python}
+#| eval: true
+import numpy as np
+import pandas as pd
+from pathlib import Path
+from summarytools import dfSummary
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+import plotly.graph_objects as go
+import plotly.colors
+import seaborn as sns
+
+home_pth = Path.cwd().parents[0]
+# 設定顯示小數點位數
+pd.options.display.precision = 0
+plt.rcParams['font.family'] = ['Noto Sans CJK TC']  
+```
+
+```{python}
+#| eval: true
+file_path = home_pth.joinpath("using_data/L2/就讀科系代碼_0604學類代碼編碼校對.xlsx")
+students_df = pd.read_excel(file_path, dtype=str)
+```
+
+## 原始資料樣態
+
+**資料預處理**
+
+-   先透過`Grok`判讀「國內最高學歷」、「國外最高學歷」的文字，將其歸類至學類層級。
+    -   判斷指令：先將系所名稱轉為英文，再進行判斷的效果最好
+    -   分段處理和輸出，可以降低AI幻覺
+-   秀雯人工檢視、修正判讀結果
+
+### 缺失資料檢視
+
+```{python}
+#| eval: false
+dfSummary(students_df, is_collapsible=False)
+```
+
+```{python}
+#| eval: false
+students_df.columns
+```
+
+-   出國前、放棄等階段為缺失值是合理的狀況，但仍有少數有領取獎學金，但僅填出國的學校，沒有填系所。
+
+```{python}
+#| eval: true
+
+NAcount = students_df["系所"].isna().sum()
+NApercent = NAcount / students_df.shape[0] *100
+print(f"國外學歷無資料的學生數量: {NAcount} ({NApercent:.2f}%)")
+
+# 計算獎學金生狀態與留學學校是否缺失的交叉表    
+tb = pd.crosstab(
+    students_df["獎學金生狀態"],
+    students_df["系所"].isna(),
+    rownames=["獎學金生狀態"],
+    colnames=["系所是否缺失"]
+)
+tb.columns = ["留學系所非缺失值", "留學系所有缺失值"]
+tb.iloc[:, 1].to_frame() 
+```
+
+-   其中有填學校但沒填系所的人數為42人，**後續分析將排除這些人**。
+
+```{python}
+#| eval: true
+# 計算獎學金生狀態與留學學校是否缺失的交叉表    
+tb = pd.crosstab(
+    students_df["留學學校"].notna(),
+    students_df["系所"].notna(),
+    rownames=["填答留學學校/系所"],
+    colnames=["填答留學系所"]
+)
+# tb.columns = ["留學系所非缺失值", "留學系所有缺失值"]
+tb
+```
+
+```{python}
+#| eval: true
+# 篩選出獎學金生狀態為 "放棄" 的學生資料
+abandoned_students_df = students_df[students_df['獎學金生狀態'] == '（「流程09：放棄或撤銷」階段）']
+
+# 按 "申請年度" 分組，並計算每組的人數 (即該年度 "放棄" 狀態的人數)
+#    使用 .size() 計算每個群組的大小，然後 .reset_index() 將結果轉為 DataFrame，並將計數列命名為 '放棄人數'
+abandoned_trend_per_year = abandoned_students_df.groupby('錄取年度').size().reset_index(name='放棄人數')
+
+
+# 視覺化趨勢圖
+
+plt.figure(figsize=(8, 4))
+plt.plot(abandoned_trend_per_year['錄取年度'].astype(str), abandoned_trend_per_year['放棄人數'], marker='o', linestyle='-') # 將年度轉為字串以避免數值型X軸問題
+plt.title('各申請年度「放棄獎學金」人數變化趨勢圖', fontsize=16)
+plt.xlabel('錄取年度', fontsize=12)
+plt.ylabel('放棄人數', fontsize=12)
+plt.xticks(rotation=45, ha="right") # 旋轉X軸標籤以避免重疊
+plt.grid(True, linestyle='--', alpha=0.7) # 加入格線
+plt.tight_layout() # 自動調整子圖參數以給定一個緊密的佈局
+plt.show()
+```
+
+### 資料篩選邏輯
+
+-   排除沒有國外學歷資料
+-   排除獎學金階段為「放棄」
+
+```{python}
+total_count = students_df.shape[0]
+# 排除國外學歷無資料
+students_df.dropna(subset=["系所"], inplace=True)
+
+# 排除放棄獎學金
+students_df = students_df[students_df['獎學金生狀態'] != '（「流程09：放棄或撤銷」階段）']
+
+new_count = students_df.shape[0]
+print(f"排除數量: {total_count - new_count}人")
+```
+
+### 資料處理過程
+
+-   歸類人社領域
+
+```{python}
+# 自然領域名稱校正
+students_df['領域名稱_最高學系'] = students_df['領域名稱_最高學系'].str.replace("自然科學領域", "自然科學、數學及統計領域")
+
+
+# 定義人社領域的列表
+humanities_social_sciences_fields = ['社會科學、新聞學及圖書資訊領域', '藝術及人文領域', '商業、管理及法律領域', '其他領域']
+
+students_df['文理領域分類_最高學系'] = np.where(
+    students_df['領域名稱_最高學系'].isin(humanities_social_sciences_fields),
+    '人社',
+    '理工')
+
+students_df['文理領域分類_國外學歷'] = np.where(
+    students_df['領域名稱_國外學歷'].isin(humanities_social_sciences_fields),
+    '人社',
+    '理工')
+```
+
+-   跨讀樣態
+
+```{python}
+#| eval: true
+
+# 跨讀樣態
+is_cross_文理 = (students_df["文理領域分類_最高學系"] != students_df["文理領域分類_國外學歷"])
+is_cross_學門 = (students_df["學門代碼_最高學系"] != students_df["學門代碼_國外學歷"])
+is_cross_領域 = (students_df["領域代碼_最高學系"] != students_df["領域代碼_國外學歷"])
+is_cross_學類 = (students_df["學類代碼_最高學系"] != students_df["學類代碼_國外學歷"])
+conditions = [
+    is_cross_領域,
+    (~is_cross_領域) & is_cross_學門, 
+    (~is_cross_學門) & (~is_cross_領域) & is_cross_學類
+]
+# conditions = [
+#     is_cross_學類,
+#     (~is_cross_學類) & is_cross_學門,  
+#     (~is_cross_學類) & (~is_cross_學門) & is_cross_領域
+# ]
+
+choices = [
+    "跨領域",
+    "同領域跨學門",
+    "同學門跨學類"
+]
+
+students_df["跨讀樣態"] = np.select(conditions, choices, default="無跨讀")
+
+students_df["領域_跨讀組合"] = students_df["領域名稱_最高學系"].str.replace("領域", "")  + " to " + students_df["領域名稱_國外學歷"].str.replace("領域", "")
+students_df["領域_跨讀組合"] = np.where(
+    is_cross_領域,  # 條件 (True 或 False)
+    students_df["領域_跨讀組合"],  # 如果條件為 True，則取此值
+    "無跨讀"  # 如果條件為 False，則取此值
+)
+
+students_df["學門_跨讀組合"] = students_df["學門名稱_最高學系"].str.replace("學門", "")  + " to " + students_df["學門名稱_國外學歷"].str.replace("學門", "")
+students_df["學門_跨讀組合"] = np.where(
+    is_cross_學門,  # 條件 (True 或 False)
+    students_df["學門_跨讀組合"],  # 如果條件為 True，則取此值
+    "無跨讀"  # 如果條件為 False，則取此值
+)
+
+students_df["學類_跨讀組合"] = students_df["學類名稱_最高學系"].str.replace("學類", "")  + " to " + students_df["學類名稱_國外學歷"].str.replace("學類", "")
+students_df["學類_跨讀組合"] = np.where(
+    is_cross_學類,  # 條件 (True 或 False)
+    students_df["學類_跨讀組合"],  # 如果條件為 True，則取此值
+    "無跨讀"  # 如果條件為 False，則取此值
+)
+
+students_df["文理_跨讀組合"] = students_df["文理領域分類_最高學系"] + " to " + students_df["文理領域分類_國外學歷"]
+```
+
+```{python}
+#| eval: false
+# 人文領域名稱前要加上 "a_" 前綴
+a_prefix_list = ['社會科學、新聞學及圖書資訊領域', '藝術及人文領域', '商業、管理及法律領域', '其他領域']
+
+# 定義一個函數來應用轉換邏輯
+def add_prefix(field_name):
+    if field_name in a_prefix_list:
+        return "a_" + field_name
+    else:
+        return "b_" + field_name
+
+# 應用函數到 '領域名稱_最高學系' 欄位
+students_df["領域名稱_最高學系"] = students_df["領域名稱_最高學系"].astype(str).apply(add_prefix)
+students_df["領域名稱_國外學歷"] = students_df["領域名稱_國外學歷"].astype(str).apply(add_prefix)
+```
+
+-   就讀時間處理
+
+```{python}
+split_data = students_df['支領公費期間'].str.split('~', expand=True)
+
+def convert_roc_to_gregorian_date_string(roc_date_str):
+    """
+    將民國紀年日期字串 (格式 YYY/MM/DD 或 YYY/M/D) 轉換為西元紀年日期字串 (格式 YYYY/MM/DD)。
+    同時處理 NaN 或非字串的輸入。
+
+    例如： "105/09/01" 會轉換為 "2016/09/01"。
+           "110/1/5" 會轉換為 "2021/01/05"。
+
+    參數:
+        roc_date_str: 民國紀年的日期字串，或可能為 NaN/None。
+
+    返回:
+        str: 西元紀年的日期字串 (格式 YYYY/MM/DD)，或在無法轉換時返回 None。
+    """
+    # 處理 NaN 或非字串輸入
+    if pd.isna(roc_date_str) or not isinstance(roc_date_str, str):
+        return None
+
+    roc_date_str = roc_date_str.strip() # 移除頭尾空白
+
+    try:
+        parts = roc_date_str.split('/')
+        if len(parts) == 3:
+            roc_year_str, month_str, day_str = parts
+
+            # 驗證日期、月份、年份是否為數字
+            if not (roc_year_str.isdigit() and month_str.isdigit() and day_str.isdigit()):
+                # print(f"警告：日期 '{roc_date_str}' 的部分包含非數字字符。")
+                return None
+
+            roc_year = int(roc_year_str)
+            month = int(month_str)
+            day = int(day_str)
+
+            # 基本的月份、日期範圍驗證 (可選，但建議)
+            if not (1 <= month <= 12 and 1 <= day <= 31):
+                # print(f"警告：日期 '{roc_date_str}' 的月份或日期超出有效範圍。")
+                return None
+
+            gregorian_year = roc_year + 1911
+            return f"{gregorian_year}/{str(month).zfill(2)}/{str(day).zfill(2)}"
+        else:
+            # print(f"警告：輸入字串 '{roc_date_str}' 格式不符合預期的 'YYY/MM/DD'。")
+            return None
+    except ValueError: # 例如 int() 轉換失敗
+        # print(f"警告：輸入字串 '{roc_date_str}' 中的日期部分無法正確解析為數字。")
+        return None
+    except Exception as e: # 捕獲其他未預期的錯誤
+        # print(f"轉換 '{roc_date_str}' 時發生未知錯誤: {e}")
+        return None
+
+
+students_df['支領公費開始'] = pd.to_datetime(split_data[0].apply(convert_roc_to_gregorian_date_string))
+students_df['支領公費結束'] = pd.to_datetime(split_data[1].apply(convert_roc_to_gregorian_date_string))
+
+# 計算支領公費期間的年長
+duration = students_df['支領公費結束'] - students_df['支領公費開始']
+
+# 將 Timedelta 轉換為年（以天為基礎，除以365.25以近似考慮閏年）
+students_df['支領公費yr'] = duration.dt.days / 365.25
+
+```
+
+```{python}
+#| eval: false
+tb = pd.crosstab(
+    students_df["獎學金生狀態"],
+    students_df["畢業日期"].isna(),
+    rownames=["獎學金生狀態"],
+    colnames=["畢業日期是否缺失"]
+)
+tb.columns = ["畢業日期非缺失值", "畢業日期為缺失值"]
+tb.iloc[:, 0].to_frame() 
+```
+
+## 分析結果
+
+### 跨讀樣態
+
+```{python}
+#| eval: true
+students_df["跨讀樣態"].value_counts().to_frame()
+```
+
+**各領域跨讀人數**
+
+-   無跨讀仍是大宗
+-   藝術人文、社會科學等領域跨讀人數較多，但這與領取公費人數有高度關聯。
+
+```{python}
+#| eval: true
+# 跨讀樣態人數
+column_order = ['跨領域', '同領域跨學門', '同學門跨學類', '無跨讀']
+grouped_data = students_df.groupby("領域名稱_最高學系")["跨讀樣態"].value_counts().unstack(fill_value=0)
+reordered_df = grouped_data.reindex(columns=column_order, fill_value=0)
+reordered_df.sort_values(by='跨領域', ascending=False)
+```
+
+**各領域內跨讀樣態分佈**
+
+-   服務、農林領域有60%跨領域就讀
+-   商管、自然科學領域完全無跨讀的比率最高
+
+```{python}
+#| eval: true
+# 跨讀樣態人數百分比
+percentage_df = (
+    students_df.groupby("領域名稱_最高學系")["跨讀樣態"]
+    .value_counts()
+    .unstack(fill_value=0)
+    .reindex(columns=column_order, fill_value=0)
+    .pipe(lambda df: df.div(df.sum(axis=1), axis=0) * 100)
+    .fillna(0)
+    .round(2)
+    .sort_values(by="跨領域", ascending=False)
+)
+percentage_df
+```
+
+**支領公費期間的差異**
+
+-   各種跨領域就讀組合都接近領滿公費期限，無明顯差異。
+
+```{python}
+students_df.groupby("文理_跨讀組合")["支領公費yr"].mean().to_frame()
+```
+
+### 跨讀流向圖
+
+**僅呈現有國外學歷、有跨讀的學生**
+
+-   人文科的流動人數較多，其中以「社科」領域的跨領域流入為大宗
+
+    -   人文藝術與社科領域的流動機會較大
+
+-   理工科跨領域流動，不完全侷限在自然科學，有不少人流向人社
+
+    -   但不多人文科流入自然科
+
+    ```{python}
+    def create_sankey_diagram(df, level, min_flow_threshold=1, node_pad=30, node_arrangement='snap', 
+                             select_field='all', custom_order=None, sort_by='alphabetical'):
+        """
+        根據指定的來源和目標欄位，產生並顯示桑基圖。
+        此函數只考慮來源欄位和目標欄位值不同的情況 (即實際發生跨讀)。
+
+        參數:
+        df (pd.DataFrame): 包含資料的 DataFrame。
+        level (str): 層級名稱 ("學門", "領域", "學類")。
+        min_flow_threshold (int): 顯示的最小流量閾值，小於此值的連結將被忽略。
+        node_pad (int): 節點之間的垂直間距。
+        node_arrangement (str): 節點對齊方式 ('snap', 'perpendicular', 'freeform', 'fixed')。
+        select_field (str): 篩選特定領域代碼，預設為 'all' 表示全部。
+        custom_order (dict): 自訂排序字典，格式為 {'節點名稱': 排序位置}。
+                             例如: {'國內_工程': 1, '國外_工程': 2, '國內_理學': 3, '國外_理學': 4}
+        sort_by (str): 排序方式，可選：
+                       - 'alphabetical': 按字母順序排序（預設）
+                       - 'flow_volume': 按流量大小排序
+                       - 'custom': 使用 custom_order 自訂排序
+                       - 'source_target': 來源節點在左，目標節點在右，各自內部按字母排序
+        """
+        # 1. 篩選出實際發生跨讀的資料
+        if level == "學門":
+            condition = is_cross_學門
+        elif level == "領域":
+            condition = is_cross_領域
+        elif level == "學類":
+            condition = is_cross_學類
+        else:
+            print("層級錯誤")
+            return
+            
+        title = f"跨{level}桑基圖"
+        sankey_df_filtered = df[condition].copy()
+        # sankey_df_filtered = df.copy()
+        
+        if select_field == "all":
+            sankey_df_filtered = sankey_df_filtered
+        else:
+            sankey_df_filtered = sankey_df_filtered[sankey_df_filtered["領域代碼_最高學系"] == select_field]
+
+        if sankey_df_filtered.empty:
+            print(f"桑基圖 '{title}': 沒有發生跨讀的資料可供繪製。")
+            return
+
+        # 2. 移除來源或目標欄位為 NaN 的行
+        source_col = f"{level}名稱_最高學系"
+        target_col = f"{level}名稱_國外學歷"
+        sankey_df_filtered.dropna(subset=[source_col, target_col], inplace=True)
+        sankey_df_filtered[source_col] = "國內_" + sankey_df_filtered[source_col]
+        sankey_df_filtered[target_col] = "國外_" + sankey_df_filtered[target_col]
+
+        if sankey_df_filtered.empty:
+            print(f"桑基圖 '{title}': 在移除 NaN 值後沒有資料可供繪製。")
+            return
+
+        # 3. 計算每個來源-目標組合的數量
+        sankey_data = sankey_df_filtered.groupby([source_col, target_col]).size().reset_index(name='value')
+
+        # 4. 根據 min_flow_threshold 篩選流量
+        sankey_data = sankey_data[sankey_data['value'] >= min_flow_threshold]
+
+        if sankey_data.empty:
+            print(f"桑基圖 '{title}': 在套用流量閾值 {min_flow_threshold} 後沒有聚合後的資料可供繪製。")
+            return
+
+        # 5. 準備節點 (nodes) 和連結 (links)
+        all_unique_nodes = pd.concat([sankey_data[source_col], sankey_data[target_col]]).unique()
+        
+        # 根據不同的排序方式處理節點順序
+        if sort_by == 'alphabetical':
+            # 按字母順序排序
+            all_nodes_sorted = sorted(list(all_unique_nodes))
+            
+        elif sort_by == 'flow_volume':
+            # 按節點的總流量排序（流入+流出）
+            node_flows = {}
+            for node in all_unique_nodes:
+                outflow = sankey_data[sankey_data[source_col] == node]['value'].sum()
+                inflow = sankey_data[sankey_data[target_col] == node]['value'].sum()
+                node_flows[node] = outflow + inflow
+            all_nodes_sorted = sorted(all_unique_nodes, key=lambda x: node_flows[x], reverse=True)
+            
+        elif sort_by == 'source_target':
+            # 來源節點在左，目標節點在右
+            source_nodes = sorted([n for n in all_unique_nodes if n.startswith("國內_")])
+            target_nodes = sorted([n for n in all_unique_nodes if n.startswith("國外_")])
+            all_nodes_sorted = source_nodes + target_nodes
+            
+        elif sort_by == 'custom':
+            # 使用自訂排序
+            if custom_order is None:
+                print("警告：選擇了 'custom' 排序但未提供 custom_order，將使用字母排序。")
+                all_nodes_sorted = sorted(list(all_unique_nodes))
+            else:
+                # 根據 custom_order 排序，未指定的節點放在最後
+                nodes_with_order = []
+                nodes_without_order = []
+                
+                for node in all_unique_nodes:
+                    if node in custom_order:
+                        nodes_with_order.append((node, custom_order[node]))
+                    else:
+                        nodes_without_order.append(node)
+                
+                # 排序有指定順序的節點
+                nodes_with_order.sort(key=lambda x: x[1])
+                ordered_nodes = [node for node, _ in nodes_with_order]
+                
+                # 將未指定順序的節點按字母排序後附加
+                all_nodes_sorted = ordered_nodes + sorted(nodes_without_order)
+        else:
+            print(f"警告：未知的排序方式 '{sort_by}'，將使用字母排序。")
+            all_nodes_sorted = sorted(list(all_unique_nodes))
+        
+        # 建立節點映射
+        node_map = {node: i for i, node in enumerate(all_nodes_sorted)}
+
+        link_source_ids = sankey_data[source_col].map(node_map)
+        link_target_ids = sankey_data[target_col].map(node_map)
+        link_values = sankey_data['value']
+        
+        # 確保所有 ID 都有效 (非 NaN)
+        valid_indices = link_source_ids.notna() & link_target_ids.notna()
+        if not valid_indices.all():
+            print(f"警告: 桑基圖 '{title}' 中發現無效的節點映射，將移除這些連結。")
+            link_source_ids = link_source_ids[valid_indices]
+            link_target_ids = link_target_ids[valid_indices]
+            link_values = link_values[valid_indices]
+            if link_values.empty:
+                print(f"桑基圖 '{title}': 在處理節點映射問題後沒有連結可供繪製。")
+                return
+                
+        # 5.1. 準備節點顏色
+        num_nodes = len(all_nodes_sorted)
+        palette = plotly.colors.qualitative.Plotly
+        node_colors = [palette[i % len(palette)] for i in range(num_nodes)]
+
+        # 6. 建立桑基圖
+        fig = go.Figure(data=[go.Sankey(
+            arrangement=node_arrangement,
+            node=dict(
+                pad=node_pad,
+                thickness=15,
+                line=dict(color="black", width=0.5),
+                label=all_nodes_sorted,
+                color=node_colors
+            ),
+            link=dict(
+                source=link_source_ids.astype(int),
+                target=link_target_ids.astype(int),
+                value=link_values,
+            ))])
+
+        # 更新標題以反映選擇的篩選條件
+        if select_field != 'all':
+            title += f" (領域代碼: {select_field})"
+        
+        fig.update_layout(title_text=title, font_size=14, height=900, width=1200)
+        fig.show()
+
+    ```
+
+```{python}
+# 定義領域排序（人文社會科學在前，自然科學在後）
+field_order_grouped = {
+    # 第一組：人文社會科學（國內）
+    '國內_社會科學、新聞學及圖書資訊領域': 1,
+    '國內_藝術及人文領域': 2,
+    '國內_教育領域': 3,
+    '國內_商業、管理及法律領域': 4,
+    '國內_服務領域': 5,
+    
+    # 第二組：自然科學（國內）
+    '國內_自然科學、數學及統計領域': 6,
+    '國內_工程、製造及營建領域': 7,
+    '國內_資訊通訊科技領域': 8,
+    '國內_醫藥衛生及社會福利領域': 9,
+    '國內_農業、林業、漁業及獸醫領域': 10,
+    
+    # 第三組：人文社會科學（國外）
+    '國外_社會科學、新聞學及圖書資訊領域': 11,
+    '國外_藝術及人文領域': 12,
+    '國外_教育領域': 13,
+    '國外_商業、管理及法律領域': 14,
+    '國外_服務領域': 15,
+    
+    # 第四組：自然科學（國外）
+    '國外_自然科學、數學及統計領域': 16,
+    '國外_工程、製造及營建領域': 17,
+    '國外_資訊通訊科技領域': 18,
+    '國外_醫藥衛生及社會福利領域': 19,
+    '國外_農業、林業、漁業及獸醫領域': 20
+}
+
+# 使用方式：
+create_sankey_diagram(students_df, "領域", sort_by='custom', custom_order=field_order_grouped)
+```
+
+```{python}
+#| eval: false
+create_sankey_diagram(
+    students_df,
+    level="學門",
+    min_flow_threshold=1,
+    node_arrangement="freeform",
+    node_pad=150
+    )
+```
+
+```{python}
+#| eval: false
+create_sankey_diagram(
+    students_df,
+    level="學類",
+    min_flow_threshold=1,
+    node_arrangement="freeform",
+    node_pad=150
+    )
+```
+
+### 分領域桑基圖
+
+**太過雜亂，不呈現**
+
+```{python}
+#| eval: false
+# 設定要檢視的領域
+field = "10"
+```
+
+```{python}
+#| eval: false
+create_sankey_diagram(
+    students_df,
+    level="領域",
+    min_flow_threshold=1,
+    node_arrangement="freeform",
+    node_pad=150,
+    select_field=field
+    )
+```
+
+```{python}
+#| eval: false
+create_sankey_diagram(
+    students_df,
+    level="學門",
+    min_flow_threshold=1,
+    node_arrangement="freeform",
+    node_pad=150,
+    select_field=field
+    )
+```
+
+```{python}
+#| eval: false
+create_sankey_diagram(
+    students_df,
+    level="學類",
+    min_flow_threshold=1,
+    node_arrangement="freeform",
+    node_pad=150,
+    select_field=field
+    )
+```
+
+### 跨讀類型熱力圖
+
+-   上圖呈現國內最高學歷(Y軸)與國外學歷(X軸)的人數交叉表，對角線表示就讀相同領域的人數，列方向（--\>）則顯示出國跨讀的人數。
+-   下圖則呈現國內最高學歷各領域(Y軸)出國領域的百分比，列方向(--\>)加總會是100%。
+    -   例如，社科領域有56.7%仍出國就讀社科領域；19.1%改讀藝術及人文領域。
+
+```{python}
+def create_heatmap_seaborn(df, level, min_flow_threshold=1, select_field='all', cmap='viridis', custom_order=None):
+    """
+    使用 Seaborn 創建熱力圖
+    
+    參數:
+    df (pd.DataFrame): 包含資料的 DataFrame
+    level (str): 層級名稱 ("學門", "領域", "學類")
+    min_flow_threshold (int): 顯示的最小流量閾值
+    select_field (str): 篩選特定領域代碼
+    cmap (str): 顏色方案
+    custom_order (dict): 自訂排序字典，格式為 {'項目名稱': 排序位置}
+    """
+    
+    # 1. 篩選出實際發生跨讀的資料
+    if level == "學門":
+        condition = is_cross_學門
+    elif level == "領域":
+        condition = is_cross_領域
+    elif level == "學類":
+        condition = is_cross_學類
+    else:
+        print("層級錯誤")
+        return
+    
+    title = f"跨{level}熱力圖"
+    # heatmap_df_filtered = df[condition].copy()
+    heatmap_df_filtered = df.copy()
+    
+    if select_field == "all":
+        heatmap_df_filtered = heatmap_df_filtered
+    else:
+        heatmap_df_filtered = heatmap_df_filtered[heatmap_df_filtered["領域代碼_最高學系"] == select_field]
+    
+    if heatmap_df_filtered.empty:
+        print(f"熱力圖 '{title}': 沒有發生跨讀的資料可供繪製。")
+        return
+    
+    # 2. 移除來源或目標欄位為 NaN 的行
+    source_col = f"{level}名稱_最高學系"
+    target_col = f"{level}名稱_國外學歷"
+    
+    heatmap_df_filtered.dropna(subset=[source_col, target_col], inplace=True)
+    # heatmap_df_filtered[source_col] = "國內_" + heatmap_df_filtered[source_col]
+    # heatmap_df_filtered[target_col] = "國外_" + heatmap_df_filtered[target_col]
+    
+    if heatmap_df_filtered.empty:
+        print(f"熱力圖 '{title}': 在移除 NaN 值後沒有資料可供繪製。")
+        return
+    
+    # 3. 計算每個來源-目標組合的數量
+    heatmap_data = heatmap_df_filtered.groupby([source_col, target_col]).size().reset_index(name='value')
+    
+    # 4. 根據 min_flow_threshold 篩選流量
+    heatmap_data = heatmap_data[heatmap_data['value'] >= min_flow_threshold]
+    
+    if heatmap_data.empty:
+        print(f"熱力圖 '{title}': 在套用流量閾值 {min_flow_threshold} 後沒有聚合後的資料可供繪製。")
+        return
+    
+    # 5. 建立熱力圖數據矩陣
+    # 創建透視表
+    pivot_table = heatmap_data.pivot(index=source_col, columns=target_col, values='value')
+    pivot_table = pivot_table.fillna(0)  # 將 NaN 填充為 0
+    
+    # 移除完全為0的行和列
+    pivot_table = pivot_table.loc[(pivot_table != 0).any(axis=1), (pivot_table != 0).any(axis=0)]
+    
+    # 6. 處理排序
+    # 獲取所有唯一的來源和目標節點
+    all_unique_names = sorted(list(set(pivot_table.index.tolist() + pivot_table.columns.tolist())))
+    
+    if custom_order is not None:
+        # 使用自訂排序函數
+        def sort_by_custom_order(items):
+            items_with_order = []
+            items_without_order = []
+            
+            for item in items:
+                if item in custom_order:
+                    items_with_order.append((item, custom_order[item]))
+                else:
+                    items_without_order.append(item)
+            
+            # 排序有指定順序的項目
+            items_with_order.sort(key=lambda x: x[1])
+            ordered_items = [item for item, _ in items_with_order]
+            
+            # 將未指定順序的項目按字母排序後附加
+            return ordered_items + sorted(items_without_order)
+        
+        # 對統一的名稱列表進行排序
+        all_unique_names_sorted = sort_by_custom_order(all_unique_names)
+    else:
+        # 如果沒有提供自訂排序，使用原本的字母排序
+        all_unique_names_sorted = all_unique_names
+    
+    # 重新索引透視表，確保行和列都按相同順序排列
+    pivot_table = pivot_table.reindex(index=all_unique_names_sorted, columns=all_unique_names_sorted, fill_value=0)
+
+    # 獲取所有唯一的來源和目標節點
+    source_nodes = sorted(pivot_table.index.tolist())
+    target_nodes = sorted(pivot_table.columns.tolist())
+    
+    plt.figure(figsize=(12, 8))
+    # 計算顏色級距範圍（每5人一個單位）
+    max_value = pivot_table.values.max()
+    min_value = pivot_table.values.min()
+    
+    # 設定顏色級距，每5人一個單位
+    from matplotlib.colors import BoundaryNorm
+    levels = list(range(int(min_value), int(max_value) + 4, 3))
+    if len(levels) < 2:  # 確保至少有兩個級距
+        levels = [min_value, max_value]
+    
+    # 創建自定義的顏色標準化
+    norm = BoundaryNorm(levels, ncolors=len(levels)-1)
+    
+    # 創建熱力圖
+    sns.heatmap(
+        pivot_table,
+        annot=True,           # 顯示數值
+        fmt='g',              # 數值格式
+        cmap=cmap,            # 顏色方案
+        cbar_kws={'label': '流量數值', 'ticks': levels, 'boundaries': levels},  # 顏色條設定
+        square=False,         # 方形格子
+        linewidths=0.5,       # 格線寬度
+        linecolor='white'     # 格線顏色
+    )
+    
+    plt.title(f'跨{level}熱力圖（人數）', fontsize=16, pad=20)
+    plt.xlabel('國外學歷', fontsize=12)
+    plt.ylabel('國內最高學系', fontsize=12)
+    plt.xticks(rotation=45, ha='right')
+    plt.yticks(rotation=0)
+    plt.tight_layout()
+    plt.show()
+
+
+```
+
+```{python}
+#| eval: true
+create_heatmap_seaborn(students_df, level="領域", min_flow_threshold=0, select_field='all', cmap='viridis', custom_order=field_order_grouped)
+```
+
+```{python}
+def create_heatmap_seaborn2(df, level, min_flow_threshold=1, select_field='all', cmap='viridis', custom_order=None):
+    """
+    使用 Seaborn 創建熱力圖
+    
+    參數:
+    df (pd.DataFrame): 包含資料的 DataFrame
+    level (str): 層級名稱 ("學門", "領域", "學類")
+    min_flow_threshold (int): 顯示的最小流量閾值
+    select_field (str): 篩選特定領域代碼
+    cmap (str): 顏色方案
+    custom_order (dict): 自訂排序字典，格式為 {'項目名稱': 排序位置}
+    """
+    
+    # 1. 篩選出實際發生跨讀的資料
+    if level == "學門":
+        condition = is_cross_學門
+    elif level == "領域":
+        condition = is_cross_領域
+    elif level == "學類":
+        condition = is_cross_學類
+    else:
+        print("層級錯誤")
+        return
+    
+    title = f"跨{level}熱力圖"
+    # heatmap_df_filtered = df[condition].copy()
+    heatmap_df_filtered = df.copy()
+    
+    if select_field == "all":
+        heatmap_df_filtered = heatmap_df_filtered
+    else:
+        heatmap_df_filtered = heatmap_df_filtered[heatmap_df_filtered["領域代碼_最高學系"] == select_field]
+    
+    if heatmap_df_filtered.empty:
+        print(f"熱力圖 '{title}': 沒有發生跨讀的資料可供繪製。")
+        return
+    
+    # 2. 移除來源或目標欄位為 NaN 的行
+    source_col = f"{level}名稱_最高學系"
+    target_col = f"{level}名稱_國外學歷"
+    
+    heatmap_df_filtered.dropna(subset=[source_col, target_col], inplace=True)
+    # heatmap_df_filtered[source_col] = "國內_" + heatmap_df_filtered[source_col]
+    # heatmap_df_filtered[target_col] = "國外_" + heatmap_df_filtered[target_col]
+    
+    if heatmap_df_filtered.empty:
+        print(f"熱力圖 '{title}': 在移除 NaN 值後沒有資料可供繪製。")
+        return
+    
+    # 3. 計算每個來源-目標組合的數量
+    heatmap_data = heatmap_df_filtered.groupby([source_col, target_col]).size().reset_index(name='value')
+    
+    # 4. 根據 min_flow_threshold 篩選流量
+    heatmap_data = heatmap_data[heatmap_data['value'] >= min_flow_threshold]
+    
+    if heatmap_data.empty:
+        print(f"熱力圖 '{title}': 在套用流量閾值 {min_flow_threshold} 後沒有聚合後的資料可供繪製。")
+        return
+    
+    # 5. 建立熱力圖數據矩陣 (原始計數)
+    pivot_table_counts = heatmap_data.pivot(index=source_col, columns=target_col, values='value')
+    pivot_table_counts = pivot_table_counts.fillna(0)  # 將 NaN 填充為 0
+    
+    # 移除完全為0的行和列 (基於原始計數)
+    pivot_table_counts = pivot_table_counts.loc[(pivot_table_counts != 0).any(axis=1), (pivot_table_counts != 0).any(axis=0)]
+
+    if pivot_table_counts.empty:
+        print(f"熱力圖 '{title}': 在移除全零行列後，沒有數據可供繪製。")
+        return
+
+    # 6. 計算每個國內最高學系流出的總人數
+    row_sums = pivot_table_counts.sum(axis=1)
+
+    # 7. 計算百分比：每個儲存格的數量 / 該國內學系流出的總人數 * 100
+    # 避免除以零的情況，如果某個國內學系總流出為0 (理論上經過篩選後不應發生，但以防萬一)
+    pivot_table_percentage = pivot_table_counts.apply(lambda x: (x / row_sums[x.name]) * 100 if row_sums[x.name] > 0 else 0, axis=1)
+    pivot_table_percentage = pivot_table_percentage.fillna(0) # 再次確保 NaN 被處理
+
+    # 8. 處理排序
+    # 獲取所有唯一的來源和目標節點
+    all_unique_names = sorted(list(set(pivot_table_percentage.index.tolist() + pivot_table_percentage.columns.tolist())))
+    
+    if custom_order is not None:
+        # 使用自訂排序函數
+        def sort_by_custom_order(items):
+            items_with_order = []
+            items_without_order = []
+            
+            for item in items:
+                if item in custom_order:
+                    items_with_order.append((item, custom_order[item]))
+                else:
+                    items_without_order.append(item)
+            
+            # 排序有指定順序的項目
+            items_with_order.sort(key=lambda x: x[1])
+            ordered_items = [item for item, _ in items_with_order]
+            
+            # 將未指定順序的項目按字母排序後附加
+            return ordered_items + sorted(items_without_order)
+        
+        # 對統一的名稱列表進行排序
+        all_unique_names_sorted = sort_by_custom_order(all_unique_names)
+    else:
+        # 如果沒有提供自訂排序，使用原本的字母排序
+        all_unique_names_sorted = all_unique_names
+    
+    # 重新索引透視表，確保行和列都按相同順序排列
+    pivot_table_percentage = pivot_table_percentage.reindex(index=all_unique_names_sorted, columns=all_unique_names_sorted, fill_value=0)
+
+    plt.figure(figsize=(14, 10)) # 稍微調整圖表大小以容納百分比
+    
+    # 創建熱力圖
+    sns.heatmap(
+        pivot_table_percentage,
+        annot=True,           # 顯示數值
+        fmt='.1f',            # 數值格式
+        cmap=cmap,            # 顏色方案
+        cbar_kws={'label': '流向百分比 (%)'}, # 顏色條設定  
+        square=False,         # 方形格子
+        linewidths=0.5,       # 格線寬度
+        linecolor='white',    # 格線顏色
+        vmin=0,               # 最小值設為0%
+        vmax=100              # 最大值設為100% (如果希望顏色條根據實際數據範圍，可以移除或調整)
+    )
+    
+    plt.title(f'國內最高學系流向國外學歷百分比 ({level}層級) -->', fontsize=16, pad=20)
+    plt.xlabel(f'國外學歷 ({level}名稱)', fontsize=12)
+    plt.ylabel(f'國內最高學系 ({level}名稱)', fontsize=12)
+    plt.xticks(rotation=45, ha='right')
+    plt.yticks(rotation=0)
+    plt.tight_layout()
+    plt.show()
+
+
+# 定義領域排序（在函數外部）
+field_order_grouped = {
+    # 第一組：人文社會科學
+    '社會科學、新聞學及圖書資訊領域': 1,
+    '藝術及人文領域': 2,
+    '教育領域': 3,
+    '商業、管理及法律領域': 4,
+    '服務領域': 5,
+    
+    # 第二組：自然科學
+    '自然科學、數學及統計領域': 6,
+    '工程、製造及營建領域': 7,
+    '資訊通訊科技領域': 8,
+    '醫藥衛生及社會福利領域': 9,
+    '農業、林業、漁業及獸醫領域': 10,
+    
+    # 其他
+    '其他領域': 11,
+}
+
+
+```
+
+```{python}
+field_order_grouped = {
+    # 第一組：人文社會科學
+    '社會科學、新聞學及圖書資訊領域': 1,
+    '藝術及人文領域': 2,
+    '教育領域': 3,
+    '商業、管理及法律領域': 4,
+    '服務領域': 5,
+    '其他領域': 6,
+    
+    # 第二組：自然科學
+    '自然科學、數學及統計領域': 7,
+    '工程、製造及營建領域': 8,
+    '資訊通訊科技領域': 9,
+    '醫藥衛生及社會福利領域': 10,
+    '農業、林業、漁業及獸醫領域': 11,
+}
+create_heatmap_seaborn2(students_df, "領域", custom_order=field_order_grouped, cmap='inferno')
+
+```

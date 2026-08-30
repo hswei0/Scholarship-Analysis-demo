@@ -1,0 +1,11 @@
+compare/__pycache__/
+*.pyc
+.ipynb_checkpoints/
+myLog.log
+.venv/
+raw/
+using_data/
+report/tmp/
+report/public/tmp
+report/public/院長版0123_files
+using_data

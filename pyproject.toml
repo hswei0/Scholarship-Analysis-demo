@@ -1,0 +1,31 @@
+[tool.poetry]
+name = "scholarship"
+version = "0.1.0"
+description = ""
+
+
+[tool.poetry.dependencies]
+python = "3.11.11"
+pandas = "^2.2.3"
+pathlib = "^1.0.1"
+xlrd = "^2.0.1"
+ipykernel = "^6.29.5"
+openpyxl = "^3.1.2"
+notebook = "^6.5.4"
+setuptools = "^75.7.0"
+ipywidgets = "^8.1.5"
+summarytools = "^0.3.0"
+tableone = "^0.9.1"
+dagshub = "^0.5.9"
+seaborn = "^0.13.2"
+pypalettes = "^0.1.5"
+highlight-text = "^0.2"
+plotly = "^6.1.2"
+
+
+[tool.poetry.group.dev.dependencies]
+autopep8 = "^2.0.2"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
